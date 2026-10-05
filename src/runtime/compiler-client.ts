@@ -1,6 +1,7 @@
 import {
   assertCompilerCacheKey,
   assertValidProject,
+  isToolchainLibcxxPchHeader,
   snapshotBrowserToolchainSources,
   toolchainCacheIdentity,
   toolchainProfileSource,
@@ -29,6 +30,7 @@ import {
 } from "../compiler/browser-rust-policy";
 import CompilerWorkerUrl from "./compiler.worker?worker&url";
 import { createModuleWorker } from "./module-worker";
+import { prefetchBrowserToolchain } from "./toolchain-prefetch";
 import { clearClangBuildGraphCache } from "../compiler/indexeddb-build-graph-cache";
 
 type ProgressListener = (progress: WorkerProgress) => void;
@@ -73,6 +75,8 @@ export class BrowserCompiler implements Compiler {
   private outputReadyClangStages = 0;
   private outputReadyRustStages = 0;
   private retainedGoStage = false;
+  private readonly acquiredToolchains = new Set<string>();
+  private acquisition: AbortController | undefined;
 
   constructor(options: BrowserCompilerOptions) {
     if (!options || typeof options !== "object") {
@@ -172,6 +176,9 @@ export class BrowserCompiler implements Compiler {
       await this.readyPromise;
       this.assertActive();
       if (generation !== this.generation) throw new Error("Browser compilation was superseded by a Worker replacement.");
+      await this.acquireToolchain(project);
+      this.assertActive();
+      if (generation !== this.generation) throw new Error("Browser compilation was superseded by a Worker replacement.");
       buildWorker = this.worker;
       const result = await this.request<BuildResult>(
         { type: "build", project, cacheKey },
@@ -207,6 +214,7 @@ export class BrowserCompiler implements Compiler {
     this.activeOperation = operation;
     this.stopWorker(new Error("Compiler Worker recycled before clearing caches."));
     const generation = this.generation;
+    this.acquiredToolchains.clear();
     try {
       const names = await caches.keys();
       await Promise.all([
@@ -249,6 +257,8 @@ export class BrowserCompiler implements Compiler {
     this.activeOperation = undefined;
     this.worker.terminate();
     const error = new Error("Compiler client disposed.");
+    this.acquisition?.abort(error);
+    this.acquisition = undefined;
     for (const request of this.pending.values()) {
       if (request.timer) clearTimeout(request.timer);
       request.reject(error);
@@ -295,7 +305,45 @@ export class BrowserCompiler implements Compiler {
     this.installWorker();
   }
 
+  /**
+   * Downloads the build's pinned toolchain assets into the HTTP or toolchain
+   * cache before the build boundary starts, so a slow network cannot spend the
+   * compiler request timeout, and a recycled Worker reuses completed downloads.
+   */
+  private async acquireToolchain(project: Project): Promise<void> {
+    const { language, target, optimization } = project.config;
+    const libcxxPrecompiledHeader = language === "cpp" && project.files.some((file) =>
+      file.path.slice(file.path.lastIndexOf("/") + 1) === "wasm-oj.pch.hpp"
+      && isToolchainLibcxxPchHeader(file.content));
+    const key = JSON.stringify([language, target, optimization, libcxxPrecompiledHeader]);
+    if (this.acquiredToolchains.has(key)) return;
+    const acquisition = new AbortController();
+    this.acquisition = acquisition;
+    try {
+      await prefetchBrowserToolchain(this.toolchains, {
+        language,
+        target,
+        optimization,
+        libcxxPrecompiledHeader,
+        signal: acquisition.signal,
+        onProgress: ({ loadedBytes, totalBytes }) => {
+          const progress = {
+            phase: "loading-toolchain" as const,
+            label: "Downloading pinned toolchain",
+            progress: totalBytes > 0 ? loadedBytes / totalBytes : 1,
+          };
+          for (const listener of this.progressListeners) listener(progress);
+        },
+      });
+    } finally {
+      if (this.acquisition === acquisition) this.acquisition = undefined;
+    }
+    this.acquiredToolchains.add(key);
+  }
+
   private stopWorker(error: Error): void {
+    this.acquisition?.abort(error);
+    this.acquisition = undefined;
     this.generation += 1;
     this.workerDormant = true;
     if (this.activeOperation?.kind === "build") this.activeOperation = undefined;

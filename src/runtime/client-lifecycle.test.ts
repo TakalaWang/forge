@@ -11,6 +11,7 @@ import type {
   RunConfig,
   RunResult,
 } from "../core/types";
+import { WASM_OJ_LIBCXX_PCH_HEADER } from "../compiler/libcxx-pch";
 import { BrowserCompiler } from "./compiler-client";
 import { BrowserRunner } from "./runner-client";
 
@@ -23,9 +24,10 @@ const TEST_TOOLCHAINS = Object.freeze([{
     id: "test-toolchains",
     version: "1.0.0",
     wasmOjContract: WASM_OJ_CONTRACT_VERSION,
-    languages: ["javascript", "rust", "go", "zig"],
+    languages: ["javascript", "cpp", "rust", "go", "zig"],
     profiles: [
       { language: "javascript", target: "wasip1", optimization: "release" },
+      { language: "cpp", target: "wasip1", optimization: "release" },
       { language: "rust", target: "wasip1", optimization: "release" },
       { language: "go", target: "wasip1", optimization: "release" },
       { language: "zig", target: "wasip1", optimization: "release" },
@@ -53,6 +55,9 @@ const workerState = vi.hoisted(() => ({
   runners: [] as FakeWorker[],
 }));
 
+const prefetchBrowserToolchain = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<void>>());
+
+vi.mock("./toolchain-prefetch", () => ({ prefetchBrowserToolchain }));
 vi.mock("./compiler.worker?worker&url", () => ({ default: "/assets/compiler.worker.js" }));
 vi.mock("./runner.worker?worker&url", () => ({ default: "/assets/runner.worker.js" }));
 vi.mock("./module-worker", () => ({
@@ -87,6 +92,8 @@ vi.mock("./module-worker", () => ({
 beforeEach(() => {
   workerState.compilers.length = 0;
   workerState.runners.length = 0;
+  prefetchBrowserToolchain.mockReset();
+  prefetchBrowserToolchain.mockResolvedValue(undefined);
 });
 
 describe("browser client lifecycle", () => {
@@ -299,7 +306,7 @@ describe("browser client lifecycle", () => {
       const assertion = expect(pending).rejects.toThrow(
         "request exceeded the 190000 ms browser boundary",
       );
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
       expect(requestsOfType(worker, "build")).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(60_000);
       expect(worker.terminated).toBe(false);
@@ -350,6 +357,114 @@ describe("browser client lifecycle", () => {
 
     expect(javascriptWorker.terminated).toBe(true);
     expect(workerState.compilers).toHaveLength(3);
+    compiler.dispose();
+  });
+
+  it("downloads the toolchain before the build boundary starts, once per profile", async () => {
+    vi.useFakeTimers();
+    try {
+      let finishDownload!: () => void;
+      prefetchBrowserToolchain.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        finishDownload = resolve;
+      }));
+      const compiler = new BrowserCompiler({ toolchains: TEST_TOOLCHAINS });
+      const worker = workerState.compilers[0]!;
+      respondToInitialization(worker);
+      await compiler.ready();
+
+      const first = compiler.build(rustProject(), "slow-network");
+      await vi.advanceTimersByTimeAsync(200_000);
+      expect(requestsOfType(worker, "build")).toHaveLength(0);
+      expect(worker.terminated).toBe(false);
+      expect(prefetchBrowserToolchain).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        language: "rust",
+        target: "wasip1",
+        optimization: "release",
+        libcxxPrecompiledHeader: false,
+      }));
+
+      finishDownload();
+      await vi.advanceTimersByTimeAsync(0);
+      respond(worker, {
+        type: "build-result",
+        requestId: requestOfTypeAt(worker, "build", 0).requestId,
+        result: failedBuild(),
+      });
+      await expect(first).resolves.toEqual(failedBuild());
+
+      const second = compiler.build(rustProject(), "warm-network");
+      await vi.advanceTimersByTimeAsync(0);
+      respond(worker, {
+        type: "build-result",
+        requestId: requestOfTypeAt(worker, "build", 1).requestId,
+        result: failedBuild(),
+      });
+      await expect(second).resolves.toEqual(failedBuild());
+      expect(prefetchBrowserToolchain).toHaveBeenCalledTimes(1);
+      compiler.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails a build whose toolchain download fails without crossing the Worker boundary", async () => {
+    prefetchBrowserToolchain.mockRejectedValueOnce(new Error("Failed to fetch"));
+    const compiler = new BrowserCompiler({ toolchains: TEST_TOOLCHAINS });
+    const worker = workerState.compilers[0]!;
+    respondToInitialization(worker);
+    await compiler.ready();
+
+    await expect(compiler.build(rustProject(), "offline")).rejects.toThrow("Failed to fetch");
+    expect(requestsOfType(worker, "build")).toHaveLength(0);
+    expect(worker.terminated).toBe(false);
+
+    const retry = compiler.build(rustProject(), "online");
+    await until(() => requestsOfType(worker, "build").length === 1);
+    respond(worker, {
+      type: "build-result",
+      requestId: requestOfType(worker, "build").requestId,
+      result: failedBuild(),
+    });
+    await expect(retry).resolves.toEqual(failedBuild());
+    expect(prefetchBrowserToolchain).toHaveBeenCalledTimes(2);
+    compiler.dispose();
+  });
+
+  it("aborts an in-flight toolchain download when the build is cancelled", async () => {
+    prefetchBrowserToolchain.mockImplementationOnce((_sources, options) => new Promise<void>((_resolve, reject) => {
+      const { signal } = options as { signal: AbortSignal };
+      signal.addEventListener("abort", () => reject(signal.reason));
+    }));
+    const compiler = new BrowserCompiler({ toolchains: TEST_TOOLCHAINS });
+    const worker = workerState.compilers[0]!;
+    respondToInitialization(worker);
+    await compiler.ready();
+
+    const pending = compiler.build(rustProject(), "cancelled-download");
+    await until(() => prefetchBrowserToolchain.mock.calls.length === 1);
+    const assertion = expect(pending).rejects.toThrow("cancelled");
+    compiler.cancel();
+
+    await assertion;
+    expect(requestsOfType(worker, "build")).toHaveLength(0);
+    compiler.dispose();
+  });
+
+  it("downloads the admitted libc++ PCH only for C++ projects that ship its exact header", async () => {
+    const compiler = new BrowserCompiler({ toolchains: TEST_TOOLCHAINS });
+    respondToInitialization(workerState.compilers[0]!);
+    await compiler.ready();
+
+    void compiler.build(cppProject(WASM_OJ_LIBCXX_PCH_HEADER), "admitted-pch").catch(() => undefined);
+    await until(() => prefetchBrowserToolchain.mock.calls.length === 1);
+    expect(prefetchBrowserToolchain.mock.calls[0]![1]).toMatchObject({ language: "cpp", libcxxPrecompiledHeader: true });
+    compiler.cancel();
+
+    const replacement = workerState.compilers[1]!;
+    void compiler.build(cppProject("#include <vector>\n"), "custom-pch").catch(() => undefined);
+    respondToInitialization(replacement);
+    await until(() => prefetchBrowserToolchain.mock.calls.length === 2);
+    expect(prefetchBrowserToolchain.mock.calls[1]![1]).toMatchObject({ language: "cpp", libcxxPrecompiledHeader: false });
     compiler.dispose();
   });
 
@@ -649,6 +764,23 @@ function rustProject(): Project {
       ...base.config,
       language: "rust",
       entry: "main.rs",
+    },
+  };
+}
+
+function cppProject(pchHeader: string): Project {
+  const base = javascriptProject();
+  return {
+    ...base,
+    files: [
+      { path: "main.cpp", language: "cpp", content: "int main() {}\n" },
+      { path: "wasm-oj.pch.hpp", language: "cpp", content: pchHeader },
+    ],
+    activeFile: "main.cpp",
+    config: {
+      ...base.config,
+      language: "cpp",
+      entry: "main.cpp",
     },
   };
 }

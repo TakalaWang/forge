@@ -104,9 +104,10 @@ compatible CORS/CORP headers.
 
 ### Prefetching a toolchain
 
-A first build downloads its toolchain inside the compiler request, so a slow network can spend the
-whole build boundary on the download (60 s for C/C++). Hosts that know the language before the
-user builds can download it earlier:
+`BrowserCompiler` downloads a build's pinned toolchain assets before its build boundary (60 s for
+C/C++) starts, reporting `loading-toolchain` progress, so a slow network cannot spend the compiler
+request timeout and a recycled Worker reuses completed downloads. Hosts that know the language
+before the user builds can start that download earlier:
 
 ```ts
 import { prefetchBrowserToolchain } from "@wasm-oj/browser";
@@ -123,7 +124,7 @@ defaults to `release`; pass `libcxxPrecompiledHeader: true` for C++ projects tha
 `wasm-oj.pch.hpp`), checks each response's byte length, and rejects on any failure so the host can
 retry. Later builds read the bytes from the HTTP cache, or from the toolchain cache when
 `registerToolchainCache()` controls the page, so serve toolchain assets with a cacheable
-`Cache-Control` (they are immutable per digest).
+`Cache-Control` (they are immutable per digest); otherwise the Workers download them again.
 
 ## Server host
 
