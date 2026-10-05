@@ -146,7 +146,7 @@ inside the judge package manifest. Judge output remains 0–100; contest `points
 declared weighting.
 
 Repositories can use [`.github/actions/woj/action.yml`](../.github/actions/woj/action.yml) with an
-exact `@wasm-oj/cli@0.2.2` package version to run the same static verification in CI.
+exact `@wasm-oj/cli@0.2.3` package version to run the same static verification in CI.
 
 ## Exact-commit synchronization
 

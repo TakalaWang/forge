@@ -4,6 +4,16 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/) and the contract/package versioning policy in
 [the versioning policy](docs/versioning.md).
 
+## 0.2.3 - 2026-10-05
+
+- Download pinned browser toolchain assets before the compiler timeout starts, so slow
+  networks do not consume the build boundary. Completed downloads can be reused by
+  replacement Workers through the browser HTTP cache or registered toolchain cache.
+- Export `prefetchBrowserToolchain` with byte progress and cancellation so hosts can
+  download the selected language's toolchain before a build.
+- Kept the execution contract at version 2. The seven code packages move together to 0.2.3;
+  independently versioned toolchain packages remain at 0.2.0.
+
 ## 0.2.2 - 2026-09-10
 
 - Fixed browser toolchain execution under strict Content Security Policy and kept isolated

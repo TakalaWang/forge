@@ -1,6 +1,6 @@
 {
   "name": "@wasm-oj/server",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Node.js compiler and runner host for the WASM-OJ SDK.",
   "license": "MIT",
   "author": "JacobLinCool",
@@ -63,8 +63,8 @@
     "runtime:build-native": "cargo build --locked --manifest-path crates/runtime-core/Cargo.toml --release --bins"
   },
   "dependencies": {
-    "@wasm-oj/contracts": "workspace:0.2.2",
-    "@wasm-oj/core": "workspace:0.2.2",
+    "@wasm-oj/contracts": "workspace:0.2.3",
+    "@wasm-oj/core": "workspace:0.2.3",
     "@wasmer/sdk": "0.10.0",
     "fflate": "0.8.3"
   }

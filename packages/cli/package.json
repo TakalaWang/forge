@@ -1,6 +1,6 @@
 {
   "name": "@wasm-oj/cli",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "The local-first woj CLI for students and WASM-OJ Organizers.",
   "license": "MIT",
   "author": "JacobLinCool",
@@ -52,8 +52,8 @@
   },
   "dependencies": {
     "@napi-rs/keyring": "1.3.0",
-    "@wasm-oj/core": "workspace:0.2.2",
-    "@wasm-oj/organizer": "workspace:0.2.2",
-    "@wasm-oj/server": "workspace:0.2.2"
+    "@wasm-oj/core": "workspace:0.2.3",
+    "@wasm-oj/organizer": "workspace:0.2.3",
+    "@wasm-oj/server": "workspace:0.2.3"
   }
 }

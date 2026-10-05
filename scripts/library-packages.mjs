@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 export const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 export const packagesRoot = path.join(repositoryRoot, "packages");
-export const CODE_VERSION = "0.2.2";
+export const CODE_VERSION = "0.2.3";
 export const TOOLCHAIN_DESCRIPTOR_SCHEMA = "wasm-oj-v2/toolchain-package";
 export const WASM_OJ_CONTRACT_VERSION = 2;
 

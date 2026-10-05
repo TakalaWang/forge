@@ -52,6 +52,6 @@
     "prepack": "pnpm run build"
   },
   "dependencies": {
-    "@wasm-oj/contracts": "workspace:0.2.2"
+    "@wasm-oj/contracts": "workspace:0.2.3"
   }
 }

@@ -1,4 +1,4 @@
-export const WOJ_CLI_VERSION = "0.2.2";
+export const WOJ_CLI_VERSION = "0.2.3";
 
 /** Stable process exit codes. They are part of the public CLI contract. */
 export const WOJ_EXIT = Object.freeze({

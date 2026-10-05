@@ -4,7 +4,7 @@ inputs:
   version:
     description: Exact @wasm-oj/cli release containing the collection contract.
     required: false
-    default: 0.2.2
+    default: 0.2.3
   root:
     description: Repository root containing wasm-oj.json.
     required: false

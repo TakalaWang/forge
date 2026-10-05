@@ -190,7 +190,7 @@ for (const required of [
   "woj organizer collection build",
   "woj organizer catalog sync",
   ".github/actions/woj/action.yml",
-  "@wasm-oj/cli@0.2.2",
+  "@wasm-oj/cli@0.2.3",
   "wasm-oj-platform/repository/v1",
   "wasm-oj-platform/problems/v1",
   "wasm-oj-platform/contests/v2",

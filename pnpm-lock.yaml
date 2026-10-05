@@ -22,25 +22,25 @@ importers:
         specifier: 1.3.0
         version: 1.3.0
       '@wasm-oj/browser':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:packages/browser
       '@wasm-oj/cli':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:packages/cli
       '@wasm-oj/contracts':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:packages/contracts
       '@wasm-oj/core':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:packages/core
       '@wasm-oj/organizer':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:packages/organizer
       '@wasm-oj/sdk':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:packages/sdk
       '@wasm-oj/server':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:packages/server
       '@wasm-oj/toolchain-clang':
         specifier: workspace:0.2.0
@@ -167,10 +167,10 @@ importers:
   packages/browser:
     dependencies:
       '@wasm-oj/contracts':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../contracts
       '@wasm-oj/core':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../core
       '@wasmer/sdk':
         specifier: 0.10.0
@@ -188,13 +188,13 @@ importers:
         specifier: 1.3.0
         version: 1.3.0
       '@wasm-oj/core':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../core
       '@wasm-oj/organizer':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../organizer
       '@wasm-oj/server':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../server
 
   packages/contracts: {}
@@ -202,7 +202,7 @@ importers:
   packages/core:
     dependencies:
       '@wasm-oj/contracts':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../contracts
       fflate:
         specifier: 0.8.3
@@ -211,34 +211,34 @@ importers:
   packages/organizer:
     dependencies:
       '@wasm-oj/core':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../core
 
   packages/sdk:
     dependencies:
       '@wasm-oj/browser':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../browser
       '@wasm-oj/contracts':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../contracts
       '@wasm-oj/core':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../core
       '@wasm-oj/organizer':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../organizer
       '@wasm-oj/server':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../server
 
   packages/server:
     dependencies:
       '@wasm-oj/contracts':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../contracts
       '@wasm-oj/core':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../core
       '@wasmer/sdk':
         specifier: 0.10.0
@@ -250,37 +250,37 @@ importers:
   packages/toolchain-clang:
     dependencies:
       '@wasm-oj/contracts':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../contracts
 
   packages/toolchain-go:
     dependencies:
       '@wasm-oj/contracts':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../contracts
 
   packages/toolchain-java:
     dependencies:
       '@wasm-oj/contracts':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../contracts
 
   packages/toolchain-javascript:
     dependencies:
       '@wasm-oj/contracts':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../contracts
 
   packages/toolchain-python:
     dependencies:
       '@wasm-oj/contracts':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../contracts
 
   packages/toolchain-rust:
     dependencies:
       '@wasm-oj/contracts':
-        specifier: workspace:0.2.2
+        specifier: workspace:0.2.3
         version: link:../contracts
 
 packages:
