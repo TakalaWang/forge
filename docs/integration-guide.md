@@ -102,6 +102,30 @@ The page must be cross-origin isolated: COOP `same-origin`, COEP `require-corp`,
 `same-origin`, and `worker-src 'self' blob:` are required. Cross-origin asset servers must emit
 compatible CORS/CORP headers.
 
+### Prefetching a toolchain
+
+`BrowserCompiler` downloads a build's pinned toolchain assets before its build boundary (60 s for
+C/C++) starts, reporting `loading-toolchain` progress, so a slow network cannot spend the compiler
+request timeout and a recycled Worker reuses completed downloads. Hosts that know the language
+before the user builds can start that download earlier:
+
+```ts
+import { prefetchBrowserToolchain } from "@wasm-oj/browser";
+
+await prefetchBrowserToolchain(toolchains, {
+  language: "cpp",
+  signal,
+  onProgress: ({ loadedBytes, totalBytes }) => render(loadedBytes / totalBytes),
+});
+```
+
+It requests exactly the digest-addressed URLs the Workers request for that language (optimization
+defaults to `release`; pass `libcxxPrecompiledHeader: true` for C++ projects that ship
+`wasm-oj.pch.hpp`), checks each response's byte length, and rejects on any failure so the host can
+retry. Later builds read the bytes from the HTTP cache, or from the toolchain cache when
+`registerToolchainCache()` controls the page, so serve toolchain assets with a cacheable
+`Cache-Control` (they are immutable per digest); otherwise the Workers download them again.
+
 ## Server host
 
 Build the packaged native executables while constructing the deployment image:

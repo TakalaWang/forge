@@ -10,6 +10,11 @@ export {
   validateBrowserRuntimeDriverPlugins,
 } from "../runtime/browser-runtime-plugin";
 export type { BrowserRuntimeDriverPlugin } from "../runtime/browser-runtime-plugin";
+export { prefetchBrowserToolchain } from "../runtime/toolchain-prefetch";
+export type {
+  BrowserToolchainPrefetchOptions,
+  BrowserToolchainPrefetchProgress,
+} from "../runtime/toolchain-prefetch";
 export { registerToolchainCache } from "../storage/service-worker";
 export type { ToolchainCacheRegistrationOptions } from "../storage/service-worker";
 export { IndexedDbDependencyCache } from "../dependencies/indexeddb-cache";

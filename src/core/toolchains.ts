@@ -1,4 +1,10 @@
-import { isBuiltinLanguage, type BuiltinLanguage, type Language, type TargetAbi } from "./types.ts";
+import {
+  isBuiltinLanguage,
+  type BuiltinLanguage,
+  type Language,
+  type OptimizationLevel,
+  type TargetAbi,
+} from "./types.ts";
 import { WASM_OJ_CONTRACT_VERSION } from "./contract.ts";
 
 export interface ToolchainDefinition {
@@ -275,6 +281,48 @@ export function toolchainCacheIdentity(language: Language) {
     runtimePackage: toolchain.runtimePackage,
     contentSha256: [...TOOLCHAIN_CONTENT_SHA256[language]],
   };
+}
+
+export interface BrowserToolchainAssetSelection {
+  readonly language: Language;
+  readonly optimization: OptimizationLevel;
+  /** C++ only: include the admitted libc++ PCH that projects with `wasm-oj.pch.hpp` load. */
+  readonly libcxxPrecompiledHeader?: boolean;
+}
+
+/** Pinned toolchain assets a browser host fetches to compile and run one project. */
+export function browserToolchainAssetPaths(selection: BrowserToolchainAssetSelection): readonly string[] {
+  const { language, optimization } = selection;
+  switch (language) {
+    case "c":
+      return Object.freeze([CLANG_PACKAGE_ASSET_PATH, CLANG_CC1_PINS_ASSET_PATH]);
+    case "cpp":
+      return Object.freeze([
+        CLANG_PACKAGE_ASSET_PATH,
+        CLANG_CC1_PINS_ASSET_PATH,
+        ...(selection.libcxxPrecompiledHeader
+          ? [CLANG_LIBCXX_PCH_MANIFEST_ASSET_PATH, CLANG_LIBCXX_PCH[`cpp-${optimization}`].path]
+          : []),
+      ]);
+    case "rust":
+      return Object.freeze([RUST_PACKAGE_ASSET_PATH, RUST_PACKAGE_MANIFEST_ASSET_PATH]);
+    case "go":
+      return Object.freeze([GO_PACKAGE_ASSET_PATH, GO_PACKAGE_MANIFEST_ASSET_PATH, GO_STANDARD_LIBRARY_ASSET_PATH]);
+    case "java":
+      return Object.freeze([
+        JAVA_COMPILER_ASSET_PATH,
+        JAVA_COMPILE_CLASSLIB_ASSET_PATH,
+        JAVA_RUNTIME_CLASSLIB_ASSET_PATH,
+      ]);
+    case "python":
+      return Object.freeze([PYTHON_PACKAGE_ASSET_PATH]);
+    case "javascript":
+      return Object.freeze([QUICKJS_ASSET_PATH]);
+    case "typescript":
+      return Object.freeze([TYPESCRIPT_ASSET_PATH, QUICKJS_ASSET_PATH]);
+    default:
+      throw new Error(`WASM-OJ has no built-in toolchain for '${language}'.`);
+  }
 }
 
 export function toolchainPackageIdentities(language: Language): string[] {
