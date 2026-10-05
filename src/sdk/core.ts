@@ -95,7 +95,8 @@ export {
   validateToolchainDescriptors,
 } from "../core/toolchain-sources";
 export { assertCompilerCacheKey } from "../core/hash";
-export { toolchainCacheIdentity } from "../core/toolchains";
+export { browserToolchainAssetPaths, toolchainCacheIdentity } from "../core/toolchains";
+export type { BrowserToolchainAssetSelection } from "../core/toolchains";
 export { createEngine, Engine } from "./engine";
 export type { JudgeProjectResult, EngineOptions } from "./engine";
 export type {

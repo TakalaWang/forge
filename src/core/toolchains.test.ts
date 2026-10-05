@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  browserToolchainAssetPaths,
+  CLANG_CC1_PINS_ASSET_PATH,
+  CLANG_LIBCXX_PCH_DEBUG_ASSET_PATH,
+  CLANG_LIBCXX_PCH_MANIFEST_ASSET_PATH,
+  CLANG_LIBCXX_PCH_RELEASE_ASSET_PATH,
+  CLANG_PACKAGE_ASSET_PATH,
   contentAddressedToolchainAssetUrl,
   expectedToolchainAssetSha256,
   PINNED_TOOLCHAIN_ASSET_SHA256,
@@ -51,5 +57,41 @@ describe("pinned toolchain assets", () => {
     expect(TOOLCHAINS.rust.compilerPackages).not.toContain("attacker-controlled@latest");
     expect(toolchainCacheIdentity("rust").compilerPackages).not.toContain("attacker-controlled@latest");
     expect(toolchainCacheIdentity("rust").contentSha256).not.toContain("0".repeat(64));
+  });
+});
+
+describe("browser toolchain asset selection", () => {
+  it("lists the pinned assets one compile and run fetches per language", () => {
+    expect(browserToolchainAssetPaths({ language: "c", optimization: "release" }))
+      .toEqual([CLANG_PACKAGE_ASSET_PATH, CLANG_CC1_PINS_ASSET_PATH]);
+    expect(browserToolchainAssetPaths({ language: "javascript", optimization: "release" }))
+      .toEqual([QUICKJS_ASSET_PATH]);
+    for (const language of ["c", "cpp", "rust", "go", "java", "python", "javascript", "typescript"]) {
+      const paths = browserToolchainAssetPaths({ language, optimization: "release" });
+      expect(Object.isFrozen(paths)).toBe(true);
+      expect(paths.length).toBeGreaterThan(0);
+      for (const path of paths) expect(PINNED_TOOLCHAIN_ASSET_SHA256[path]).toMatch(/^[a-f0-9]{64}$/);
+    }
+  });
+
+  it("adds only the libc++ PCH for the requested C++ optimization", () => {
+    expect(browserToolchainAssetPaths({ language: "cpp", optimization: "release" }))
+      .toEqual([CLANG_PACKAGE_ASSET_PATH, CLANG_CC1_PINS_ASSET_PATH]);
+    expect(browserToolchainAssetPaths({ language: "cpp", optimization: "debug", libcxxPrecompiledHeader: true }))
+      .toEqual([
+        CLANG_PACKAGE_ASSET_PATH,
+        CLANG_CC1_PINS_ASSET_PATH,
+        CLANG_LIBCXX_PCH_MANIFEST_ASSET_PATH,
+        CLANG_LIBCXX_PCH_DEBUG_ASSET_PATH,
+      ]);
+    expect(browserToolchainAssetPaths({ language: "cpp", optimization: "release", libcxxPrecompiledHeader: true }))
+      .toContain(CLANG_LIBCXX_PCH_RELEASE_ASSET_PATH);
+    expect(browserToolchainAssetPaths({ language: "c", optimization: "release", libcxxPrecompiledHeader: true }))
+      .not.toContain(CLANG_LIBCXX_PCH_MANIFEST_ASSET_PATH);
+  });
+
+  it("fails closed for languages without a built-in toolchain", () => {
+    expect(() => browserToolchainAssetPaths({ language: "kotlin", optimization: "release" }))
+      .toThrow("no built-in toolchain for 'kotlin'");
   });
 });
