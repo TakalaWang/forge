@@ -391,6 +391,10 @@ export async function clearSdkDirectClangCaches(): Promise<void> {
   objectCache.clear();
 }
 
+export function clearSdkDirectClangBuildGraph(): void {
+  objectCache.clear();
+}
+
 export function exportSdkDirectClangBuildGraphState(): IncrementalBuildGraphState {
   return objectCache.exportState();
 }

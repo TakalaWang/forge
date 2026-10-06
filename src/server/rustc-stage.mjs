@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { gunzipSync } from "node:zlib";
 import { Wasmer } from "@wasmer/sdk/node";
 import {
@@ -23,81 +24,91 @@ import {
   rustcDependencyArguments,
   rustcObjectArguments,
 } from "../compiler/rust-toolchain.ts";
-import { withProcessKeepalive } from "./process-keepalive.mjs";
+let toolchain;
 
-let exitCode = 0;
+process.stdin.once("end", () => process.exit(0));
 
-try {
-  const encoded = JSON.parse(await readStdin());
+for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity })) {
+  if (!line) continue;
+  let response;
+  try {
+    response = { ok: true, result: await compile(JSON.parse(line)) };
+  } catch (error) {
+    response = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  writeFileSync(3, `${JSON.stringify(response)}\n`);
+}
+
+async function loadToolchain(encoded) {
+  const packageAsset = requiredToolchainAsset(encoded, RUST_TOOLCHAIN.packageAsset);
+  const manifestAsset = requiredToolchainAsset(encoded, RUST_TOOLCHAIN.manifestAsset);
+  const identity = JSON.stringify([packageAsset, manifestAsset, encoded.verifiedToolchain === true]);
+  if (toolchain?.identity === identity) return toolchain;
   const [packageBytes, manifest] = await Promise.all([
-    loadRustPackage(
-      requiredToolchainAsset(encoded, RUST_TOOLCHAIN.packageAsset),
-      encoded.verifiedToolchain === true,
-    ),
-    loadRustManifest(
-      requiredToolchainAsset(encoded, RUST_TOOLCHAIN.manifestAsset),
-      encoded.verifiedToolchain === true,
-    ),
+    loadRustPackage(packageAsset, encoded.verifiedToolchain === true),
+    loadRustManifest(manifestAsset, encoded.verifiedToolchain === true),
   ]);
   const wasmer = new Wasmer({ cache: false });
-  const pkg = await withProcessKeepalive(wasmer.packages.load(packageBytes));
+  const pkg = await wasmer.packages.load(packageBytes);
   for (const command of ["rustc", RUST_LINKER_COMMAND]) {
     if (!pkg.commands.includes(command)) throw new Error(`The pinned Rust WebC does not expose its ${command} command.`);
   }
-  const sandbox = await withProcessKeepalive(wasmer.sandboxes.create({
+  toolchain = { identity, wasmer, pkg, manifest };
+  return toolchain;
+}
+
+async function compile(encoded) {
+  const { wasmer, pkg, manifest } = await loadToolchain(encoded);
+  const sandbox = await wasmer.sandboxes.create({
     packages: [pkg],
     files: Object.fromEntries(encoded.request.files.map((file) => [`${RUST_GUEST_ROOT}/${file.path}`, file.content])),
-  }));
-  await sandbox.fs.mkdir(`${RUST_GUEST_ROOT}/build/deps`, { recursive: true });
-  const state = { abandoned: false };
-  let dependencyStdout = "";
-  let dependencyStderr = "";
-  let dependencyFailed = false;
-  for (const dependency of encoded.request.dependencies ?? []) {
-    const output = await runRustStage(sandbox, state, {
-      command: "rustc",
-      args: rustcDependencyArguments(dependency, encoded.request.optimization),
-      env: deterministicRustCompilerEnvironment(),
-      outputPath: dependency.outputPath,
-      stage: `rustc dependency ${dependency.id}`,
-      outputValidator: isRustArchive,
-    });
-    dependencyStdout += output.stdout;
-    dependencyStderr += output.stderr;
-    if (!output.success) {
-      dependencyFailed = true;
-      break;
-    }
-  }
-  if (dependencyFailed) {
-    writeResult({
-      success: false,
-      stdout: dependencyStdout,
-      stderr: dependencyStderr,
-      diagnostics: parseRustDiagnostics(dependencyStderr, encoded.request.entry),
-    });
-  } else {
-  const compiled = await runRustStage(sandbox, state, {
-    command: "rustc",
-    args: rustcObjectArguments(
-      encoded.request.entry,
-      encoded.request.optimization,
-      encoded.request.rootExterns,
-    ),
-    env: deterministicRustCompilerEnvironment(),
-    outputPath: RUST_OBJECT_PATH,
-    stage: "rustc",
-    requiresAllocatorBitcode: true,
   });
-  const diagnostics = parseRustDiagnostics(`${dependencyStderr}${compiled.stderr}`, encoded.request.entry);
-  if (!compiled.success) {
-    writeResult({
-      success: false,
-      stdout: `${dependencyStdout}${compiled.stdout}`,
-      stderr: `${dependencyStderr}${compiled.stderr}`,
-      diagnostics,
+  const state = { abandoned: false };
+  try {
+    await sandbox.fs.mkdir(`${RUST_GUEST_ROOT}/build/deps`, { recursive: true });
+    let dependencyStdout = "";
+    let dependencyStderr = "";
+    for (const dependency of encoded.request.dependencies ?? []) {
+      const output = await runRustStage(sandbox, state, {
+        command: "rustc",
+        args: rustcDependencyArguments(dependency, encoded.request.optimization),
+        env: deterministicRustCompilerEnvironment(),
+        outputPath: dependency.outputPath,
+        stage: `rustc dependency ${dependency.id}`,
+        outputValidator: isRustArchive,
+      });
+      dependencyStdout += output.stdout;
+      dependencyStderr += output.stderr;
+      if (!output.success) {
+        return {
+          success: false,
+          stdout: dependencyStdout,
+          stderr: dependencyStderr,
+          diagnostics: parseRustDiagnostics(dependencyStderr, encoded.request.entry),
+        };
+      }
+    }
+    const compiled = await runRustStage(sandbox, state, {
+      command: "rustc",
+      args: rustcObjectArguments(
+        encoded.request.entry,
+        encoded.request.optimization,
+        encoded.request.rootExterns,
+      ),
+      env: deterministicRustCompilerEnvironment(),
+      outputPath: RUST_OBJECT_PATH,
+      stage: "rustc",
+      requiresAllocatorBitcode: true,
     });
-  } else {
+    const diagnostics = parseRustDiagnostics(`${dependencyStderr}${compiled.stderr}`, encoded.request.entry);
+    if (!compiled.success) {
+      return {
+        success: false,
+        stdout: `${dependencyStdout}${compiled.stdout}`,
+        stderr: `${dependencyStderr}${compiled.stderr}`,
+        diagnostics,
+      };
+    }
     const linkerArguments = instantiateRustLinkerArguments(
       manifest.linkerArguments,
       encoded.request.optimization,
@@ -114,27 +125,16 @@ try {
       outputPath: RUST_FINAL_OUTPUT_PATH,
       stage: "wasm-ld",
     });
-    writeResult({
+    return {
       success: linked.success && Boolean(linked.bytes),
       wasmBase64: linked.bytes ? Buffer.from(linked.bytes).toString("base64") : undefined,
       stdout: `${dependencyStdout}${compiled.stdout}${linked.stdout}`,
       stderr: `${dependencyStderr}${compiled.stderr}${linked.stderr}`,
       diagnostics,
-    });
+    };
+  } finally {
+    if (!state.abandoned) await sandbox.close();
   }
-  }
-} catch (error) {
-  writeFileSync(3, JSON.stringify({
-    ok: false,
-    error: error instanceof Error ? error.message : String(error),
-  }));
-  exitCode = 1;
-} finally {
-  setTimeout(() => process.exit(exitCode), 10);
-}
-
-function writeResult(result) {
-  writeFileSync(3, JSON.stringify({ ok: true, result }));
 }
 
 function requireAllocatorBitcodePath(observation) {
@@ -175,12 +175,6 @@ function verifyDigest(filename, bytes, expected) {
 
 function uint8View(bytes) {
   return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-}
-
-async function readStdin() {
-  const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
-  return Buffer.concat(chunks).toString("utf8");
 }
 
 function parseRustDiagnostics(output, entry) {

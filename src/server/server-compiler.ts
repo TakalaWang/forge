@@ -21,7 +21,7 @@ import type {
   ServerToolchainSource,
   WorkerProgress,
 } from "@wasm-oj/contracts";
-import { clearSdkDirectClangCaches } from "../compiler/sdk-direct-clang.ts";
+import { clearSdkDirectClangBuildGraph, clearSdkDirectClangCaches } from "../compiler/sdk-direct-clang.ts";
 import {
   buildProject,
   clearCompilerHostCaches,
@@ -33,6 +33,10 @@ import type {
   RustCompileResult,
 } from "../compiler/rust-toolchain.ts";
 import { RUST_COMPILE_TIMEOUT_MS, RUST_TOOLCHAIN } from "../compiler/rust-toolchain.ts";
+import {
+  MAX_OUTPUT_READY_RUST_STAGES_PER_WORKER,
+  OUTPUT_READY_RUST_STAGES_PER_BUILD,
+} from "../compiler/browser-rust-policy.ts";
 import type { GoCompileRequest, GoCompileResult } from "../compiler/go-toolchain.ts";
 import { GO_COMPILE_TIMEOUT_MS, GO_TOOLCHAIN } from "../compiler/go-toolchain.ts";
 import type { JavaCompileRequest, JavaCompileResult } from "../compiler/java-toolchain.ts";
@@ -43,6 +47,7 @@ import {
   JAVA_RUNTIME_CLASSLIB_ASSET_PATH,
 } from "../core/toolchains.ts";
 import { BoundedByteCollector, readBoundedRegularFile } from "./bounded-transport.ts";
+import { ReusableStage } from "./reusable-stage.ts";
 import { buildControlTimeoutMs } from "../compiler/build-timeout-policy.ts";
 import {
   assertVerifiedToolchainDistribution,
@@ -79,6 +84,8 @@ const SERVER_STAGE_PROGRESS_LINE_LIMIT_BYTES = 1024 * 1024;
 const SERVER_BUILD_RESPONSE_LIMIT_BYTES = 256 * 1024 * 1024;
 const SERVER_BUILD_REQUEST_LIMIT_BYTES = 768 * 1024 * 1024;
 const SERVER_COMPILER_STAGE_RESPONSE_LIMIT_BYTES = 256 * 1024 * 1024;
+const SERVER_STAGE_IDLE_TIMEOUT_MS = 30_000;
+const SERVER_RUST_BUILDS_PER_STAGE = MAX_OUTPUT_READY_RUST_STAGES_PER_WORKER / OUTPUT_READY_RUST_STAGES_PER_BUILD;
 interface ServerCompilerStageOptions extends ServerCompilerOptions {
   /** @internal Canonical stage root inherited from the package entry process. */
   stageDirectory: string;
@@ -106,6 +113,9 @@ export class ServerCompiler implements Compiler {
   private readonly stageDirectory: string;
   private readonly activeChildren = new Set<ReturnType<typeof spawn>>();
   private activeOperation: ServerCompilerOperation | undefined;
+  private buildStage: ReusableStage | undefined;
+  private rustStage: ReusableStage | undefined;
+  private wasmer: Wasmer | undefined;
 
   constructor(options: ServerCompilerOptions);
   /** @internal */
@@ -167,9 +177,9 @@ export class ServerCompiler implements Compiler {
       await this.ready();
       this.assertCurrent(operation, "Server compilation was cancelled before initialization completed.");
       if (!this.inProcess) return await this.buildIsolated(project, cacheKey, operation);
-      // The in-process compiler runs only inside a one-shot stage child that exits after
-      // the build, so the client is not closed: SDK shutdown terminates workers mid-task.
-      const wasmer = new Wasmer({ cache: false });
+      // The in-process compiler runs only inside a stage child that serves sequential builds,
+      // so the client is never closed: SDK shutdown terminates workers mid-task.
+      const wasmer = this.wasmer ??= new Wasmer({ cache: false });
       configureWasmerCompilerHost({
         getWasmer: () => wasmer,
         loadToolchainAsset: (assetPath) => this.loadToolchainAsset(assetPath),
@@ -189,7 +199,7 @@ export class ServerCompiler implements Compiler {
         this.assertCurrent(operation, "Server compilation was cancelled.");
         return result;
       } finally {
-        await clearSdkDirectClangCaches();
+        clearSdkDirectClangBuildGraph();
       }
     } finally {
       this.endOperation(operation);
@@ -279,124 +289,62 @@ export class ServerCompiler implements Compiler {
         throw new Error(`Server compiler request exceeds ${SERVER_BUILD_REQUEST_LIMIT_BYTES} bytes.`);
       }
       await writeFile(requestPath, encodedRequest, { flag: "wx", mode: 0o600 });
-      return await new Promise((resolve, reject) => {
-        const script = serverStageScript(this.stageDirectory, "server-build-stage.mjs");
-        const child = spawn(process.execPath, [
-          "--experimental-strip-types",
-          "--disable-warning=ExperimentalWarning",
-          script,
-        ], {
-          // Progress on fd 3 is best-effort. The artifact response uses a private
-          // one-shot file because Wasmer worker transports may claim inherited fds.
-          stdio: ["pipe", "pipe", "pipe", "pipe"],
-          env: {
-            ...process.env,
-            WASM_OJ_BUILD_REQUEST: requestPath,
-            WASM_OJ_BUILD_RESPONSE: responsePath,
-          },
-        });
-        this.activeChildren.add(child);
-        let progressBuffer = "";
-        let timedOut = false;
-        let transportError: Error | undefined;
-        const failTransport = (error: Error) => {
-          transportError ??= error;
-          child.kill("SIGKILL");
-        };
-        const stdout = new BoundedByteCollector(
-          "Isolated server compiler stdout",
-          SERVER_STAGE_LOG_LIMIT_BYTES,
-          failTransport,
-        );
-        const stderr = new BoundedByteCollector(
-          "Isolated server compiler stderr",
-          SERVER_STAGE_LOG_LIMIT_BYTES,
-          failTransport,
-        );
-        child.stdout.on("data", (chunk: Buffer) => stdout.append(chunk));
-        child.stderr.on("data", (chunk: Buffer) => stderr.append(chunk));
-        child.on("error", (error) => { transportError = error; });
-        child.stdin.on("error", (error) => { transportError ??= error; });
-        const progressStream = child.stdio[3];
-        if (!progressStream || typeof progressStream === "number") {
-          child.kill("SIGKILL");
-          this.activeChildren.delete(child);
-          reject(new Error("The isolated server compiler did not expose its progress channel."));
-          return;
-        }
-        progressStream.on("data", (chunk: Buffer) => {
-          if (Buffer.byteLength(progressBuffer, "utf8") + chunk.byteLength > SERVER_STAGE_PROGRESS_LINE_LIMIT_BYTES) {
-            failTransport(new Error(
-              `Isolated server compiler progress exceeded the ${SERVER_STAGE_PROGRESS_LINE_LIMIT_BYTES} byte line boundary.`,
-            ));
-            return;
-          }
-          progressBuffer += chunk.toString();
-          const lines = progressBuffer.split("\n");
-          progressBuffer = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line) continue;
-            try {
-              const progress = JSON.parse(line) as WorkerProgress;
-              if (this.isCurrent(operation)) {
-                for (const listener of this.progressListeners) listener(progress);
-              }
-            } catch {
-              // Compiler internals may write non-protocol data to fd 3.
-            }
-          }
-        });
-        const timer = setTimeout(() => {
-          timedOut = true;
-          child.kill("SIGKILL");
-        }, timeoutMs);
-        child.on("close", async () => {
-          clearTimeout(timer);
-          this.activeChildren.delete(child);
-          try {
-            this.assertCurrent(operation, "Server compilation was cancelled.");
-            if (timedOut) throw new Error(`Server compilation exceeded ${timeoutMs} ms.`);
-            if (transportError) throw transportError;
-            let encodedResponse: Buffer;
-            try {
-              encodedResponse = await readBoundedRegularFile(responsePath, SERVER_BUILD_RESPONSE_LIMIT_BYTES);
-            } catch (error) {
-              const stageError = stderr.text().trim() || stdout.text().trim();
-              if (stageError) throw new Error(stageError, { cause: error });
-              throw error;
-            }
-            const response = deserialize(encodedResponse) as {
-              ok: boolean;
-              result?: BuildResult;
-              error?: string;
-            };
-            if (!response.ok || !response.result) {
-              throw new Error(
-                response.error
-                || stderr.text()
-                || stdout.text()
-                || "The isolated server compiler failed.",
-              );
-            }
-            resolve(response.result);
-          } catch (error) {
-            reject(error);
-          }
-        });
-        child.stdin.end();
+      this.buildStage ??= new ReusableStage({
+        script: serverStageScript(this.stageDirectory, "server-build-stage.mjs"),
+        label: "isolated server compiler",
+        lineLimitBytes: SERVER_STAGE_PROGRESS_LINE_LIMIT_BYTES,
+        idleTimeoutMs: SERVER_STAGE_IDLE_TIMEOUT_MS,
+        terminationGraceMs: 1_000,
       });
+      return await this.buildStage.run({
+        request: JSON.stringify({ requestPath, responsePath }),
+        timeoutMs,
+        timeoutMessage: `Server compilation exceeded ${timeoutMs} ms.`,
+        line: (line) => {
+          let message: { complete?: unknown };
+          try {
+            message = JSON.parse(line) as { complete?: unknown };
+          } catch {
+            // Compiler internals may write non-protocol data to fd 3.
+            return false;
+          }
+          if (message.complete === true) return true;
+          if (this.isCurrent(operation)) {
+            for (const listener of this.progressListeners) listener(message as WorkerProgress);
+          }
+          return false;
+        },
+        complete: async ({ stdout, stderr }) => {
+          this.assertCurrent(operation, "Server compilation was cancelled.");
+          let encodedResponse: Buffer;
+          try {
+            encodedResponse = await readBoundedRegularFile(responsePath, SERVER_BUILD_RESPONSE_LIMIT_BYTES);
+          } catch (error) {
+            const stageError = stderr.trim() || stdout.trim();
+            if (stageError) throw new Error(stageError, { cause: error });
+            throw error;
+          }
+          const response = deserialize(encodedResponse) as {
+            ok: boolean;
+            result?: BuildResult;
+            error?: string;
+          };
+          if (!response.ok || !response.result) {
+            throw new Error(response.error || stderr || stdout || "The isolated server compiler failed.");
+          }
+          return response.result;
+        },
+      });
+    } catch (error) {
+      this.assertCurrent(operation, "Server compilation was cancelled.");
+      throw error;
     } finally {
       await rm(transportDirectory, { recursive: true, force: true });
     }
   }
 
   private async compileRust(request: RustCompileRequest): Promise<RustCompileResult> {
-    const result = await this.runCompilerStage<Omit<RustCompileResult, "wasm"> & { wasmBase64?: string }>(
-      "rustc-stage.mjs",
-      { request },
-      RUST_COMPILE_TIMEOUT_MS,
-      [RUST_TOOLCHAIN.packageAsset, RUST_TOOLCHAIN.manifestAsset],
-    );
+    const result = await this.runRustStage<Omit<RustCompileResult, "wasm"> & { wasmBase64?: string }>({ request });
     return {
       ...result,
       diagnostics: parseRustDiagnostics(result.stderr),
@@ -441,8 +389,45 @@ export class ServerCompiler implements Compiler {
     };
   }
 
+  private runRustStage<T>(input: object): Promise<T> {
+    const operation = this.activeOperation;
+    if (!operation || operation.kind !== "build") {
+      return Promise.reject(new Error("Server compilation was cancelled before its compiler stage started."));
+    }
+    this.assertCurrent(operation, "Server compilation was cancelled before its compiler stage started.");
+    const timeoutMs = RUST_COMPILE_TIMEOUT_MS + 5_000;
+    this.rustStage ??= new ReusableStage({
+      script: serverStageScript(this.stageDirectory, "rustc-stage.mjs"),
+      label: "isolated compiler stage 'rustc-stage.mjs'",
+      lineLimitBytes: SERVER_COMPILER_STAGE_RESPONSE_LIMIT_BYTES,
+      idleTimeoutMs: SERVER_STAGE_IDLE_TIMEOUT_MS,
+      maxExchanges: SERVER_RUST_BUILDS_PER_STAGE,
+    });
+    let responseLine = "";
+    return this.rustStage.run({
+      request: JSON.stringify({
+        toolchainAssets: serverToolchainAssetFiles(this.toolchains, [RUST_TOOLCHAIN.packageAsset, RUST_TOOLCHAIN.manifestAsset]),
+        verifiedToolchain: this.verifiedToolchain,
+        ...input,
+      }),
+      timeoutMs,
+      timeoutMessage: `The isolated compiler stage 'rustc-stage.mjs' exceeded ${timeoutMs} ms.`,
+      line: (line) => {
+        responseLine = line;
+        return true;
+      },
+      complete: ({ stdout, stderr }) => {
+        const response = JSON.parse(responseLine) as { ok: boolean; result?: T; error?: string };
+        if (!response.ok || !response.result) {
+          throw new Error(response.error || stderr || stdout || "The isolated compiler stage 'rustc-stage.mjs' failed.");
+        }
+        return response.result;
+      },
+    });
+  }
+
   private runCompilerStage<T>(
-    scriptName: Exclude<ServerStageScript, "server-build-stage.mjs" | "server-runner-stage.mjs">,
+    scriptName: Exclude<ServerStageScript, "server-build-stage.mjs" | "server-runner-stage.mjs" | "rustc-stage.mjs">,
     input: object,
     timeoutMs: number,
     assetPaths: readonly string[],
@@ -573,6 +558,8 @@ export class ServerCompiler implements Compiler {
   }
 
   private terminateChildren(): void {
+    this.buildStage?.terminate();
+    this.rustStage?.terminate();
     for (const child of this.activeChildren) {
       if (this.inProcess) {
         child.kill("SIGKILL");
@@ -594,6 +581,8 @@ function uint8View(bytes: Buffer): Uint8Array {
   return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
+let stageCompiler: { identity: string; compiler: ServerCompiler } | undefined;
+
 /** @internal Entry point used only by the isolated Node compiler process. */
 export async function buildServerProjectInProcess(
   options: ServerCompilerStageOptions,
@@ -601,15 +590,22 @@ export async function buildServerProjectInProcess(
   cacheKey: string,
   onProgress: (progress: WorkerProgress) => void,
 ): Promise<BuildResult> {
-  const compiler = new ServerCompiler(options, IN_PROCESS_STAGE);
+  const identity = JSON.stringify(options);
+  if (stageCompiler?.identity !== identity) {
+    disposeServerBuildStage();
+    stageCompiler = { identity, compiler: new ServerCompiler(options, IN_PROCESS_STAGE) };
+  }
+  const { compiler } = stageCompiler;
   const removeProgress = compiler.onProgress(onProgress);
-  const terminate = () => compiler.dispose();
-  process.once("SIGTERM", terminate);
   try {
     return await compiler.build(project, cacheKey);
   } finally {
-    process.off("SIGTERM", terminate);
     removeProgress();
-    compiler.dispose();
   }
+}
+
+/** @internal Releases the isolated compiler process's reusable compiler state. */
+export function disposeServerBuildStage(): void {
+  stageCompiler?.compiler.dispose();
+  stageCompiler = undefined;
 }

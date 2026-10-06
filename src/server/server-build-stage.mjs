@@ -1,47 +1,51 @@
 import { writeFileSync } from "node:fs";
+import path from "node:path";
+import { createInterface } from "node:readline";
 import { deserialize, serialize } from "node:v8";
-import { buildServerProjectInProcess } from "./server-compiler.ts";
+import { buildServerProjectInProcess, disposeServerBuildStage } from "./server-compiler.ts";
 import { deserializeServerToolchainSources } from "./toolchain-sources.ts";
 import { readBoundedRegularFile } from "./bounded-transport.ts";
-import { withProcessKeepalive } from "./process-keepalive.mjs";
 
 const SERVER_BUILD_REQUEST_LIMIT_BYTES = 768 * 1024 * 1024;
 
-try {
-  const responsePath = requiredResponsePath();
-  const encoded = deserialize(await readBoundedRegularFile(
-    requiredRequestPath(),
-    SERVER_BUILD_REQUEST_LIMIT_BYTES,
-  ));
-  const result = await withProcessKeepalive(buildServerProjectInProcess(
-    {
-      compilerExecutable: encoded.compilerExecutable,
-      stageDirectory: encoded.stageDirectory,
-      toolchains: deserializeServerToolchainSources(encoded.toolchains),
-      verifiedToolchain: encoded.verifiedToolchain === true,
-    },
-    encoded.project,
-    encoded.cacheKey,
-    (progress) => writeFileSync(3, `${JSON.stringify(progress)}\n`),
-  ));
-  writeFileSync(responsePath, serialize({ ok: true, result }), { flag: "wx" });
-  setTimeout(() => process.exit(0), 10);
-} catch (error) {
-  writeFileSync(requiredResponsePath(), serialize({
-    ok: false,
-    error: error instanceof Error ? error.message : String(error),
-  }), { flag: "wx" });
-  setTimeout(() => process.exit(1), 10);
+process.stdin.once("end", () => process.exit(0));
+process.once("SIGTERM", () => {
+  disposeServerBuildStage();
+  process.exit(1);
+});
+
+for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity })) {
+  if (!line) continue;
+  const { requestPath, responsePath } = parseTransport(line);
+  let response;
+  try {
+    const encoded = deserialize(await readBoundedRegularFile(requestPath, SERVER_BUILD_REQUEST_LIMIT_BYTES));
+    const result = await buildServerProjectInProcess(
+      {
+        compilerExecutable: encoded.compilerExecutable,
+        stageDirectory: encoded.stageDirectory,
+        toolchains: deserializeServerToolchainSources(encoded.toolchains),
+        verifiedToolchain: encoded.verifiedToolchain === true,
+      },
+      encoded.project,
+      encoded.cacheKey,
+      (progress) => writeFileSync(3, `${JSON.stringify(progress)}\n`),
+    );
+    response = { ok: true, result };
+  } catch (error) {
+    response = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  writeFileSync(responsePath, serialize(response), { flag: "wx" });
+  writeFileSync(3, `${JSON.stringify({ complete: true })}\n`);
 }
 
-function requiredResponsePath() {
-  const value = process.env.WASM_OJ_BUILD_RESPONSE;
-  if (!value) throw new Error("WASM_OJ_BUILD_RESPONSE is required.");
-  return value;
-}
-
-function requiredRequestPath() {
-  const value = process.env.WASM_OJ_BUILD_REQUEST;
-  if (!value) throw new Error("WASM_OJ_BUILD_REQUEST is required.");
+function parseTransport(line) {
+  const value = JSON.parse(line);
+  if (
+    typeof value?.requestPath !== "string" || !path.isAbsolute(value.requestPath)
+    || typeof value.responsePath !== "string" || !path.isAbsolute(value.responsePath)
+  ) {
+    throw new Error("The isolated server compiler received an invalid transport request.");
+  }
   return value;
 }
