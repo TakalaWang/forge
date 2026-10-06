@@ -51,9 +51,9 @@ flowchart LR
 
 Browser requests cross dedicated module-Worker boundaries. C/C++ retains bounded immutable Clang
 and content-addressed graph state; Rust and Go use serialized nested stages with bounded generation
-lifetime. Python and JavaScript package source files directly. Server builds use a fresh isolated child. Cancellation,
-restart, timeout, cache clearing, disposal, family switch, and stage-budget exhaustion establish a
-complete browser Worker-generation boundary.
+lifetime. Python and JavaScript package source files directly. Server builds run one at a time in a
+reusable isolated child. Cancellation, restart, timeout, cache clearing, disposal, family switch,
+and stage-budget exhaustion establish a complete browser Worker-generation boundary.
 
 The runner is one Rust codebase compiled to browser Wasm and native executables. Both forms admit
 the same artifacts, deterministic inputs, resource limits, denied capabilities, filesystem model,
@@ -94,7 +94,7 @@ and pinned wasm-ld resources. A browser stage keeps its SDK client and verified 
 warm while creating a fresh sandbox for each build. rustc emits the crate object plus allocator
 bitcode; a fresh linker process produces the standalone Wasm artifact. The generation is recycled
 before its stage budget is exceeded. Server compilation uses the same content and arguments in a
-one-shot child.
+child that keeps the loaded package for sequential builds and is replaced under the same budget.
 
 The resulting shared-memory module remains a `wasip1` artifact. The host supplies imported memory
 but denies guest thread spawning.

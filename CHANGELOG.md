@@ -10,6 +10,11 @@ All notable changes to WASM-OJ are recorded here. Releases follow
   runtime-file preparation now run to exit in per-build SDK sandboxes, which removes the
   0.10.0 race that could leave a finished process waiting forever for output EOF and stall
   Python preparation or TypeScript compilation under load. Compiled artifacts are unchanged.
+- The server compiler child and its rustc stage serve sequential builds and keep their loaded
+  toolchain packages, so the SDK's package load is paid once per child instead of once per build.
+  Cancellation, timeout, or failure discards the child; an idle child exits after 30 s, and either
+  child exits when its parent goes away. The rustc stage is replaced after the browser's stage
+  budget (two builds).
 - `@wasm-oj/browser` ships the SDK's browser runtime files unbundled under
   `assets/wasmer-sdk-<digest>/` and no longer installs `@wasmer/sdk`. Hosts that copy the
   package's `dist/assets/` must copy that directory recursively. The SDK's WISP networking

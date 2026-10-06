@@ -142,10 +142,12 @@ or server child instead.
 Initialization verifies executable regular files and every descriptor asset before constructing
 the engine.
 
-Each server build uses a fresh isolated compiler child. Each execution uses the native Rust runtime
-process and a bounded request/response transport. Server startup never provisions binaries,
-downloads assets, invokes a host compiler for user source, follows a symlink-owned toolchain path,
-or falls back to another directory.
+Server builds run one at a time in an isolated compiler child that keeps its loaded toolchain
+packages and creates a fresh SDK sandbox for each build. Cancellation, timeout, or failure discards
+the child; it exits after a short idle period or when its parent goes away. Each execution uses
+the native Rust runtime process and a bounded request/response transport. Server startup never
+provisions binaries, downloads assets, invokes a host compiler for user source, follows a
+symlink-owned toolchain path, or falls back to another directory.
 
 The default writable cache root is `.wasm-oj` below the current working directory when the caller
 does not provide `cacheDirectory`; a filesystem root is never accepted.
