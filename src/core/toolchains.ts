@@ -55,6 +55,7 @@ export const PYTHON_PACKAGE_ASSET_PATH = `/toolchains/python-${PYTHON_VERSION}-w
 export const PYTHON_PACKAGE_MANIFEST_ASSET_PATH = `/toolchains/python-${PYTHON_VERSION}-wasip1.manifest.json`;
 export const PYTHON_COMPRESSED_PACKAGE_SHA256 = "10027f0e32c77dfa0ce1c413b6cb27307d6744fe5e18e6da8cea738bd020260c";
 export const PYTHON_PACKAGE_MANIFEST_SHA256 = "53a24b258363a8494af164121111a34b49c85fa0e054627fe131feba6f359cd5";
+export const PYTHON_COMMAND_SHA256 = "69e9d87da6c8a628694ffd76c3d0f26e7aaa0bc91d952a28d9fc37c7144e354c";
 export const PYTHON_RUNTIME_FILES_ARCHIVE_SHA256 = "c1acac884af1c86833db5b65f8cc0a2304fce74dea0a05d9b40bde0a4e3e7c0e";
 export const QUICKJS_VERSION = "0.15.1";
 export const QUICKJS_PACKAGE = `wasm-oj/quickjs-ng@${QUICKJS_VERSION}`;
