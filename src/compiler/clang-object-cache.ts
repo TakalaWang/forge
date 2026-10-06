@@ -129,9 +129,7 @@ function normalizeProjectDependencies(
   const normalized = new Set<string>();
   for (const raw of dependencyPaths) {
     if (raw.startsWith("/usr/") || raw.startsWith("/sysroot/") || raw.startsWith("/lib/")) continue;
-    const path = raw.startsWith("/project/")
-      ? raw.slice("/project/".length)
-      : raw.replace(/^\.\//, "");
+    const path = raw.replace(/^(?:\/workspace\/|\/project\/|\.\/)/, "");
     if (!path || path.startsWith("/") || path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
       return undefined;
     }

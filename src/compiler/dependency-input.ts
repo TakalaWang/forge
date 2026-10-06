@@ -161,7 +161,7 @@ export function rustDependencyInput(project: Project): RustDependencyInput {
     if (!/^(?:2015|2018|2021|2024)$/.test(edition)) {
       throw new Error(`Cargo dependency '${item.package.id}' has unsupported Rust edition '${edition}'.`);
     }
-    const outputPath = `/work/build/deps/lib${String(index).padStart(4, "0")}_${crateName}.rlib`;
+    const outputPath = `/workspace/build/deps/lib${String(index).padStart(4, "0")}_${crateName}.rlib`;
     descriptorById.set(item.package.id, {
       id: item.package.id,
       crateName,

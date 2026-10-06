@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { deserialize, serialize } from "node:v8";
 import { gunzipSync } from "node:zlib";
-import { Runtime } from "@wasmer/sdk/node";
+import { Wasmer } from "@wasmer/sdk/node";
 import type { Compiler } from "@wasm-oj/core";
 import {
   assertCompilerCacheKey,
@@ -37,7 +37,6 @@ import type { GoCompileRequest, GoCompileResult } from "../compiler/go-toolchain
 import { GO_COMPILE_TIMEOUT_MS, GO_TOOLCHAIN } from "../compiler/go-toolchain.ts";
 import type { JavaCompileRequest, JavaCompileResult } from "../compiler/java-toolchain.ts";
 import { JAVA_COMPILE_TIMEOUT_MS } from "../compiler/java-toolchain.ts";
-import { initializeServerWasmerSdk } from "./wasmer-runtime.ts";
 import {
   JAVA_COMPILER_ASSET_PATH,
   JAVA_COMPILE_CLASSLIB_ASSET_PATH,
@@ -168,9 +167,11 @@ export class ServerCompiler implements Compiler {
       await this.ready();
       this.assertCurrent(operation, "Server compilation was cancelled before initialization completed.");
       if (!this.inProcess) return await this.buildIsolated(project, cacheKey, operation);
-      const runtime = new Runtime({ registry: null });
+      // The in-process compiler runs only inside a one-shot stage child that exits after
+      // the build, so the client is not closed: SDK shutdown terminates workers mid-task.
+      const wasmer = new Wasmer({ cache: false });
       configureWasmerCompilerHost({
-        getRuntime: () => runtime,
+        getWasmer: () => wasmer,
         loadToolchainAsset: (assetPath) => this.loadToolchainAsset(assetPath),
         loadToolchainFile: (assetPath) => this.loadToolchainFile(assetPath),
         compileRust: (request) => this.compileRust(request),
@@ -189,7 +190,6 @@ export class ServerCompiler implements Compiler {
         return result;
       } finally {
         await clearSdkDirectClangCaches();
-        runtime.free();
       }
     } finally {
       this.endOperation(operation);
@@ -253,7 +253,6 @@ export class ServerCompiler implements Compiler {
     await Promise.all([
       access(this.compilerExecutable, fsConstants.X_OK),
       ...serverToolchainDirectories(this.toolchains).map((directory) => access(directory, fsConstants.R_OK)),
-      this.inProcess ? initializeServerWasmerSdk() : Promise.resolve(),
     ]);
   }
 

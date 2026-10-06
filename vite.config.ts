@@ -1,6 +1,7 @@
 import vinext from "vinext";
 import { defineConfig, type UserConfig } from "vite";
 import { sites } from "./build/sites-vite-plugin.ts";
+import { wasmerSdkRuntime } from "./scripts/wasmer-sdk-runtime.mjs";
 
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 
@@ -24,10 +25,11 @@ export default defineConfig(async (): Promise<UserConfig> => {
       modulePreload: { polyfill: false },
       target: "es2022",
     },
-    worker: { format: "es" as const },
+    worker: { format: "es" as const, plugins: () => [wasmerSdkRuntime()] },
     plugins: [
       vinext(),
       sites(),
+      wasmerSdkRuntime(),
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         configPath: "./wrangler.jsonc",

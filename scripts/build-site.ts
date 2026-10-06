@@ -125,9 +125,10 @@ async function removeVerifiedBrowserOnlyDuplicatesFromServer(): Promise<void> {
   for (const directory of serverRoots) {
     const entries = await readdir(directory);
     const wasmNames = entries.filter((name) => name.endsWith(".wasm"));
+    const sdkRuntimeNames = entries.filter((name) => name.startsWith("wasmer-sdk-"));
     const monacoWorkerNames = entries.filter((name) => /^(?:css|editor|html|json|ts)\.worker-.*\.js$/.test(name));
     for (const name of wasmNames) {
-      if (!/^(?:runtime-core_bg|wasmer_js_bg)-[A-Za-z0-9_-]+\.wasm$/.test(name)) {
+      if (!/^runtime-core_bg-[A-Za-z0-9_-]+\.wasm$/.test(name)) {
         throw new Error(`Sites build emitted unexpected server Wasm module '${name}'.`);
       }
     }
@@ -142,6 +143,22 @@ async function removeVerifiedBrowserOnlyDuplicatesFromServer(): Promise<void> {
       .sort();
     if (JSON.stringify(actualMonacoWorkers) !== JSON.stringify(expectedMonacoWorkers)) {
       throw new Error(`Sites build emitted an incomplete or duplicate Monaco Worker set in '${path.relative(root, directory)}'.`);
+    }
+    for (const name of sdkRuntimeNames) {
+      if (!/^wasmer-sdk-[0-9a-f]{16}$/.test(name)) {
+        throw new Error(`Sites build emitted an invalid Wasmer SDK runtime directory '${name}'.`);
+      }
+      for (const relative of await recursiveFiles(path.join(directory, name))) {
+        const [serverBytes, clientBytes] = await Promise.all([
+          readFile(path.join(directory, name, relative)),
+          readFile(path.join(clientAssets, name, relative)),
+        ]);
+        if (serverBytes.byteLength !== clientBytes.byteLength
+          || sha256(serverBytes) !== sha256(clientBytes)) {
+          throw new Error(`Server browser-only module '${name}/${relative}' is not identical to its browser-static copy.`);
+        }
+      }
+      await rm(path.join(directory, name), { recursive: true });
     }
     for (const name of [...wasmNames, ...monacoWorkerNames]) {
       const [serverBytes, clientBytes] = await Promise.all([

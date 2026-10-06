@@ -4,69 +4,56 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { serialize } from "node:v8";
 import { gunzipSync } from "node:zlib";
-import { init, Runtime, Wasmer } from "@wasmer/sdk/node";
+import { Wasmer } from "@wasmer/sdk/node";
 import { withProcessKeepalive } from "./process-keepalive.mjs";
 import {
+  PYTHON_COMMAND_SHA256,
   PYTHON_COMPRESSED_PACKAGE_SHA256,
   PYTHON_PACKAGE,
   PYTHON_PACKAGE_SHA256,
 } from "../core/toolchains.ts";
+import { readWebcAtom } from "../runner/webc.ts";
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_RESULT_BYTES = 256 * 1024 * 1024;
 const MAX_ERROR_CHARACTERS = 64 * 1024;
 
-let runtime;
-let pkg;
-let commands = [];
 let response;
 let exitCode = 0;
 
 try {
   const input = parseInput(JSON.parse(await readStdin()));
-  await withProcessKeepalive(init({ log: "warn" }));
-  runtime = new Runtime({ registry: null });
   const packagePath = input.toolchainAsset;
   const compressed = await readFile(packagePath);
   if (!input.verifiedToolchain) verifyDigest(packagePath, compressed, PYTHON_COMPRESSED_PACKAGE_SHA256);
   const expanded = uint8View(gunzipSync(compressed));
   if (!input.verifiedToolchain) verifyDigest(packagePath, expanded, PYTHON_PACKAGE_SHA256);
-  pkg = await withProcessKeepalive(Wasmer.fromFile(expanded, runtime));
-
-  const commandMap = pkg.commands;
-  commands = uniqueCommands(commandMap);
-  const command = commandMap[input.request.command];
-  if (!command) {
-    throw new Error(
-      `Package '${input.request.packageSpecifier}' does not expose '${input.request.command}'.`,
-    );
-  }
 
   let bytes;
   if (input.request.operation === "command-binary") {
-    bytes = command.binary().slice();
-    if (!WebAssembly.validate(bytes)) {
-      throw new Error(
-        `Package '${input.request.packageSpecifier}' command '${input.request.command}' returned invalid WebAssembly.`,
-      );
-    }
+    bytes = readWebcAtom(expanded, input.request.command).slice();
+    verifyDigest(`${input.request.packageSpecifier} command '${input.request.command}'`, bytes, PYTHON_COMMAND_SHA256);
   } else {
-    const instance = await withProcessKeepalive(command.run({
-      args: input.request.args,
+    const wasmer = new Wasmer({ cache: false, outputBytes: MAX_RESULT_BYTES });
+    const pkg = await withProcessKeepalive(wasmer.packages.load(expanded));
+    const sandbox = await withProcessKeepalive(wasmer.sandboxes.create({
+      packages: [pkg],
       env: {
         PYTHONHOME: "/usr/local",
         PYTHONHASHSEED: "0",
         PYTHONDONTWRITEBYTECODE: "1",
       },
     }));
-    const output = await withProcessKeepalive(instance.wait());
-    if (!output.ok) {
+    const output = await withProcessKeepalive(
+      sandbox.command(input.request.command, input.request.args).run({ check: false }),
+    );
+    if (!output.ok || output.stdout.truncated) {
       throw new Error(
         `Unable to export runtime files from ${input.request.packageSpecifier}: `
-        + `exit ${output.code}: ${boundedText(output.stderr)}`,
+        + `${output.reason} ${output.exitCode}: ${boundedText(output.stderr.text())}`,
       );
     }
-    bytes = output.stdoutBytes.slice();
+    bytes = output.stdout.bytes;
   }
 
   if (bytes.byteLength > MAX_RESULT_BYTES) {
@@ -82,33 +69,6 @@ try {
   response = { ok: false, error: boundedText(error instanceof Error ? error.message : String(error)) };
   exitCode = 1;
 } finally {
-  const cleanupErrors = [];
-  for (const command of commands) {
-    try {
-      command.free();
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-  }
-  try {
-    pkg?.free();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  try {
-    runtime?.free();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  if (cleanupErrors.length > 0) {
-    response = {
-      ok: false,
-      error: boundedText(
-        `Unable to release isolated Wasmer resources: ${cleanupErrors.map(errorText).join("; ")}`,
-      ),
-    };
-    exitCode = 1;
-  }
   try {
     writeFileSync(requiredResponsePath(), serialize(response), {
       flag: "wx",
@@ -167,14 +127,6 @@ function verifyDigest(filename, bytes, expected) {
 
 function uint8View(bytes) {
   return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-}
-
-function uniqueCommands(commandMap) {
-  const unique = new Set();
-  for (const command of Object.values(commandMap)) {
-    if (command && typeof command.free === "function") unique.add(command);
-  }
-  return [...unique];
 }
 
 function requiredResponsePath() {

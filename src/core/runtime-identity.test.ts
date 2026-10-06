@@ -22,7 +22,7 @@ describe("WASM-OJ runtime identity", () => {
 
   it("pins the executable browser runtime bytes", async () => {
     const runtimeCore = await readFile(fileURLToPath(new URL("../runner/generated/runtime-core_bg.wasm", import.meta.url)));
-    const wasmerSdk = await readFile(fileURLToPath(import.meta.resolve("@wasmer/sdk/wasm")));
+    const wasmerSdk = await readFile(fileURLToPath(new URL("../pkg/wasmer_sdk_js_bg.wasm", import.meta.resolve("@wasmer/sdk/browser"))));
     expect(await sha256Hex(runtimeCore)).toBe(WASM_OJ_RUNTIME_COMPONENTS.runtimeCoreWasmSha256);
     expect(await sha256Hex(wasmerSdk)).toBe(WASM_OJ_RUNTIME_COMPONENTS.wasmerSdkWasmSha256);
   });

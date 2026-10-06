@@ -1,7 +1,6 @@
 /// <reference lib="webworker" />
 
-import { Runtime, init } from "@wasmer/sdk";
-import wasmerWasmUrl from "@wasmer/sdk/wasm?url";
+import type { Wasmer } from "@wasmer/sdk";
 import { WASM_OJ_SCHEMAS } from "../core/contract";
 import { sha256Hex } from "../core/hash";
 import {
@@ -56,20 +55,14 @@ import JavaStageWorkerUrl from "./java-stage.worker?worker&url";
 import type { JavaCompileRequest, JavaCompileResult, JavaStageRequest } from "@/src/compiler/java-toolchain";
 import { JAVA_COMPILE_TIMEOUT_MS } from "@/src/compiler/java-toolchain";
 import { PersistentIsolatedStage } from "./isolated-stage";
-import {
-  createModuleWorker,
-  createModuleWorkerBootstrap,
-  type ModuleWorkerBootstrap,
-  moduleWorkerBaseUrl,
-} from "./module-worker";
-import wasmerThreadWorkerUrl from "./wasmer-thread.worker?worker&url";
+import { createModuleWorker, moduleWorkerBaseUrl } from "./module-worker";
+import { createBrowserWasmer } from "./wasmer-sdk";
 
 const scope: DedicatedWorkerGlobalScope = self as unknown as DedicatedWorkerGlobalScope;
 const workerBaseUrl = moduleWorkerBaseUrl();
 let toolchainSources: readonly BrowserToolchainSource[] | undefined;
-let runtime: Runtime | undefined;
-let runtimeInitialization: Promise<void> | undefined;
-let wasmerThreadWorkerBootstrap: ModuleWorkerBootstrap | undefined;
+let wasmer: Wasmer | undefined;
+let wasmerInitialization: Promise<void> | undefined;
 let rustStage: PersistentIsolatedStage<RustcStageRequest, RustCompileResult> | undefined;
 let goStage: PersistentIsolatedStage<GoStageRequest, GoCompileResult> | undefined;
 let javaStage: PersistentIsolatedStage<JavaStageRequest, JavaCompileResult> | undefined;
@@ -194,9 +187,9 @@ function compileJava(request: JavaCompileRequest): Promise<JavaCompileResult> {
 
 function configureCompilerHost(): void {
   configureWasmerCompilerHost({
-    getRuntime: () => {
-      if (!runtime) throw new Error("The compiler Wasmer runtime is not initialized for this language.");
-      return runtime;
+    getWasmer: () => {
+      if (!wasmer) throw new Error("The compiler Wasmer runtime is not initialized for this language.");
+      return wasmer;
     },
     loadToolchainAsset,
     loadToolchainFile,
@@ -231,29 +224,16 @@ function languageRequiresOuterRuntime(language: string): boolean {
 }
 
 async function ensureOuterRuntime(requestId: string): Promise<void> {
-  if (runtime) return;
-  runtimeInitialization ??= (async () => {
+  if (wasmer) return;
+  wasmerInitialization ??= (async () => {
     progress(requestId, "initializing", "Starting Wasmer compiler runtime", 0.1);
-    const bootstrap = createModuleWorkerBootstrap(new URL(wasmerThreadWorkerUrl, workerBaseUrl));
-    wasmerThreadWorkerBootstrap = bootstrap;
-    try {
-      await init({
-        log: "warn",
-        module: new URL(wasmerWasmUrl, workerBaseUrl),
-        workerUrl: bootstrap.url,
-      });
-      runtime = new Runtime({ registry: null });
-    } catch (error) {
-      if (wasmerThreadWorkerBootstrap === bootstrap) wasmerThreadWorkerBootstrap = undefined;
-      bootstrap.revoke();
-      throw error;
-    }
+    wasmer = await createBrowserWasmer();
     progress(requestId, "initializing", "Wasmer compiler runtime ready", 0.2);
   })();
   try {
-    await runtimeInitialization;
+    await wasmerInitialization;
   } catch (error) {
-    runtimeInitialization = undefined;
+    wasmerInitialization = undefined;
     throw error;
   }
 }
@@ -293,12 +273,11 @@ async function quiesce(): Promise<void> {
       await clangBuildGraphPersistence.persistIfDirty();
       await disposeSdkDirectClangToolchain();
     } finally {
+      // The Worker closes after quiescing, which ends the SDK's nested Workers;
+      // closing the client here would terminate them at arbitrary points.
       clearCompilerHostCaches();
-      runtime?.free();
-      runtime = undefined;
-      runtimeInitialization = undefined;
-      wasmerThreadWorkerBootstrap?.revoke();
-      wasmerThreadWorkerBootstrap = undefined;
+      wasmer = undefined;
+      wasmerInitialization = undefined;
     }
   }
 }

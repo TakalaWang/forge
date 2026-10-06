@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
-import { init, Runtime, Wasmer } from "@wasmer/sdk/node";
+import { Wasmer } from "@wasmer/sdk/node";
 import {
   PYTHON_RUNTIME_FILES_EXPORT_SCRIPT,
   decodeRuntimeFiles,
@@ -13,17 +13,15 @@ if (process.argv.length !== 3) {
 }
 
 const packagePath = path.resolve(process.argv[2]);
-let runtime;
 let exitCode = 0;
 
 try {
-  await init({ log: "warn" });
-  runtime = new Runtime({ registry: null });
   const packageBytes = gunzipSync(await readFile(packagePath));
-  const pkg = await Wasmer.fromFile(new Uint8Array(packageBytes), runtime);
-  const command = pkg.commands.python;
-  if (!command) throw new Error(`Python package '${packagePath}' does not expose python.`);
-  const output = await runPython(command, `${String.raw`
+  const wasmer = new Wasmer({ cache: false, outputBytes: 256 * 1024 * 1024 });
+  const pkg = await wasmer.packages.load(new Uint8Array(packageBytes));
+  if (!pkg.commands.includes("python")) throw new Error(`Python package '${packagePath}' does not expose python.`);
+  const sandbox = await wasmer.sandboxes.create({ packages: [pkg] });
+  const output = await runPython(sandbox, `${String.raw`
 import hashlib
 import importlib.util
 import json
@@ -42,7 +40,7 @@ sys.stderr.write("WASM_OJ_SMOKE:" + json.dumps({
 }, sort_keys=True, separators=(",", ":")) + "\n")
 `}
 ${PYTHON_RUNTIME_FILES_EXPORT_SCRIPT}`);
-  const smokeLine = output.stderr.split("\n").find((line) => line.startsWith("WASM_OJ_SMOKE:"));
+  const smokeLine = output.stderr.text().split("\n").find((line) => line.startsWith("WASM_OJ_SMOKE:"));
   if (!smokeLine) throw new Error(`Python runtime smoke emitted no result: ${output.stderr}`);
   const smoke = JSON.parse(smokeLine.slice("WASM_OJ_SMOKE:".length));
   const expectedSmoke = {
@@ -58,7 +56,7 @@ ${PYTHON_RUNTIME_FILES_EXPORT_SCRIPT}`);
   if (JSON.stringify(smoke) !== JSON.stringify(expectedSmoke)) {
     throw new Error(`Python runtime smoke mismatch: ${JSON.stringify(smoke)}.`);
   }
-  const archive = output.stdoutBytes.slice();
+  const archive = output.stdout.bytes;
   const files = decodeRuntimeFiles(archive);
   process.stdout.write(`WASM_OJ_PYTHON_INSPECTION:${JSON.stringify({
     archiveSha256: createHash("sha256").update(archive).digest("hex"),
@@ -73,32 +71,24 @@ ${PYTHON_RUNTIME_FILES_EXPORT_SCRIPT}`);
   exitCode = 1;
 } finally {
   setTimeout(() => process.exit(exitCode), 50);
-  try {
-    runtime?.free();
-  } catch (error) {
-    process.stderr.write(`Unable to release the Python smoke runtime: ${String(error)}\n`);
-    exitCode = 1;
-  }
 }
 
-async function runPython(command, script) {
-  const instance = await command.run({
-    args: ["-c", script],
-    env: {
-      PYTHONHOME: "/usr/local",
-      PYTHONHASHSEED: "0",
-      PYTHONDONTWRITEBYTECODE: "1",
-    },
-  });
+async function runPython(sandbox, script) {
   const keepAlive = setInterval(() => {}, 1_000);
   let output;
   try {
-    output = await instance.wait();
+    output = await sandbox.command("python", ["-c", script], {
+      env: {
+        PYTHONHOME: "/usr/local",
+        PYTHONHASHSEED: "0",
+        PYTHONDONTWRITEBYTECODE: "1",
+      },
+    }).run({ check: false });
   } finally {
     clearInterval(keepAlive);
   }
   if (!output.ok) {
-    throw new Error(`Python command failed with exit ${output.code}: ${output.stderr}`);
+    throw new Error(`Python command failed with ${output.reason} ${output.exitCode}: ${output.stderr.text()}`);
   }
   return output;
 }

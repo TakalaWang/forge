@@ -1,9 +1,4 @@
-import {
-  Directory,
-  Runtime,
-  Wasmer,
-  type Command,
-} from "@wasmer/sdk";
+import type { Package, Sandbox, Wasmer } from "@wasmer/sdk";
 import { WASM_OJ_CONTRACT_VERSION } from "../core/contract.ts";
 import {
   decodeClangPins,
@@ -44,11 +39,11 @@ import {
   DETERMINISTIC_NATIVE_RUNTIME,
   DETERMINISTIC_NATIVE_SOURCE_PATH,
 } from "../runtime/determinism.ts";
-import { MountedOutputStabilityObserver } from "../runtime/mounted-output-stability.ts";
 import { cppDependencyInput } from "./dependency-input.ts";
+import { runSandboxCommand } from "./sandbox-command.ts";
 
 export interface SdkDirectClangHost {
-  runtime: Runtime;
+  wasmer: Wasmer;
   loadToolchainAsset(path: string): Promise<Uint8Array>;
   loadToolchainFile(path: string): Promise<Uint8Array>;
   progress(requestId: string, phase: WorkerPhase, label: string, value?: number): void;
@@ -56,19 +51,26 @@ export interface SdkDirectClangHost {
 }
 
 interface LoadedToolchain {
-  pkg: Wasmer;
+  pkg: Package;
   pins: ClangPins;
-  compiler: Command;
-  linker: Command;
 }
 
-let loadedToolchain: Promise<LoadedToolchain> | undefined;
+let loadedToolchain: { wasmer: Wasmer; toolchain: Promise<LoadedToolchain> } | undefined;
 let loadedLibcxxPchManifest: Promise<LibcxxPchManifest> | undefined;
 const loadedLibcxxPch = new Map<LibcxxPchProfile, Promise<Uint8Array>>();
 const objectCache = new ClangObjectCache(64 * 1024 * 1024);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const STAGE_OUTPUT_TIMEOUT_MS = 55_000;
+const GUEST_ROOT = "/workspace";
+// The pinned argv and the admitted libc++ PCH name `/project`; SDK sandboxes keep files in `/workspace`.
+const PINNED_GUEST_ROOT = "/project";
+// The admitted libc++ PCH asset records its header at the pinned `/project` path.
+const LIBCXX_PCH_OVERLAY_PATH = `${GUEST_ROOT}/.wasm-oj/libcxx-pch-overlay.yaml`;
+const PREFIX_MAPS = [
+  `-fmacro-prefix-map=${GUEST_ROOT}/=${PINNED_GUEST_ROOT}/`,
+  `-fdebug-prefix-map=${GUEST_ROOT}/=${PINNED_GUEST_ROOT}/`,
+];
 
 interface ClangStageResult {
   diagnostics: Diagnostic[];
@@ -93,9 +95,8 @@ interface StageObservation<T> {
 }
 
 /**
- * Browser compiler that drives the pinned cc1 and wasm-ld jobs through
- * the official SDK threadpool while keeping every command and project volume
- * isolated. No Clang driver or guest subprocess is involved.
+ * Compiler that drives the pinned cc1 and wasm-ld jobs through the official
+ * SDK, one sandbox per build. No Clang driver or guest subprocess is involved.
  */
 export async function buildClangWithSdkDirect(
   project: Project,
@@ -112,7 +113,7 @@ export async function buildClangWithSdkDirect(
 
   const started = performance.now();
   host.progress(requestId, "loading-toolchain", "Loading pinned Clang 22 toolchain", 0.15);
-  const { pins, compiler, linker } = await ensureToolchain(requestId, host);
+  const { pins, pkg } = await ensureToolchain(requestId, host);
   const configKey = `${project.config.language}-${project.config.optimization}`;
   const config = pins.configs[configKey];
   if (!config) throw new Error(`The pinned Clang manifest has no '${configKey}' configuration.`);
@@ -123,12 +124,20 @@ export async function buildClangWithSdkDirect(
   const dependencies = cppDependencyInput(project);
   for (const [path, bytes] of dependencies.files) projectFiles.set(path, bytes);
   projectFiles.set(DETERMINISTIC_NATIVE_SOURCE_PATH, encoder.encode(DETERMINISTIC_NATIVE_RUNTIME));
-  const directory = new Directory(Object.fromEntries(
-    [...projectFiles].map(([path, bytes]) => [`/${path}`, bytes]),
-  ));
+  const sandbox = await host.wasmer.sandboxes.create({
+    packages: [pkg],
+    files: Object.fromEntries([...projectFiles].map(([path, bytes]) => [`${GUEST_ROOT}/${path}`, bytes])),
+    env: {
+      PATH: "/bin",
+      SOURCE_DATE_EPOCH: "946684800",
+      TZ: "UTC",
+      LC_ALL: "C",
+    },
+  });
+  const stages = { compiler: pins.command, linker: pins.linkerCommand, sandbox, abandoned: false };
   try {
-    await ensureDirectory(directory, "/build");
-    await ensureDirectory(directory, "/.wasm-oj");
+    await sandbox.fs.mkdir(`${GUEST_ROOT}/build`, { recursive: true });
+    await sandbox.fs.mkdir(`${GUEST_ROOT}/.wasm-oj`, { recursive: true });
     host.trace(requestId, "filesystemPrepare", "end");
 
   const isCpp = project.config.language === "cpp";
@@ -151,7 +160,7 @@ export async function buildClangWithSdkDirect(
   const structuredDiagnostics: Diagnostic[] = [];
 
   const pchHeader = isCpp ? findPrecompiledHeader(project) : undefined;
-  const pchPath = "/project/build/wasm-oj.pch";
+  const pchPath = `${GUEST_ROOT}/build/wasm-oj.pch`;
   let pchInput: BuildGraphInput | undefined;
   let admittedPch = false;
   if (pchHeader) {
@@ -164,28 +173,37 @@ export async function buildClangWithSdkDirect(
         throw new Error(`C++ projects using WASM-OJ's admitted libc++ PCH may not define reserved path '${reservedHeader}'.`);
       }
       projectFiles.set(reservedHeader, headerBytes);
-      await directory.writeFile(`/${reservedHeader}`, headerBytes);
+      await sandbox.fs.writeFile(`${GUEST_ROOT}/${reservedHeader}`, headerBytes);
+      await sandbox.fs.writeText(LIBCXX_PCH_OVERLAY_PATH, JSON.stringify({
+        version: 0,
+        "case-sensitive": "true",
+        roots: [{
+          type: "directory",
+          name: PINNED_GUEST_ROOT,
+          contents: [{ type: "file", name: reservedHeader, "external-contents": `${GUEST_ROOT}/${reservedHeader}` }],
+        }],
+      }));
       pch = await loadLibcxxPch(configKey as LibcxxPchProfile, requestId, host);
       pchHits += 1;
-      await directory.writeFile(pchPath.slice("/project".length), pch);
+      await sandbox.fs.writeFile(pchPath, pch);
     } else {
       const baseKey = await objectCache.unitManifestKey(pins, configKey, pchHeader, headerBytes);
-      const pchManifestKey = await sha256Hex(JSON.stringify({ baseKey, mode: "c++-header" }));
+      // A PCH records absolute input paths, so entries built under another root never match.
+      const pchManifestKey = await sha256Hex(JSON.stringify({ baseKey, mode: "c++-header", root: GUEST_ROOT }));
       const cached = await objectCache.lookupPch(pchManifestKey, projectFiles);
       if (cached) {
         pch = cached;
         pchHits += 1;
-        await directory.writeFile(pchPath.slice("/project".length), pch);
+        await sandbox.fs.writeFile(pchPath, pch);
       } else {
         pchMisses += 1;
-        const dependencyPath = "/project/build/wasm-oj.pch.d";
+        const dependencyPath = `${GUEST_ROOT}/build/wasm-oj.pch.d`;
         const args = instantiateClangPch(config.cc1, pins.placeholders, pchHeader, pchPath);
         args.splice(args.length - 1, 0, ...dependencies.includeDirectories.flatMap((directory) => ["-I", directory]));
         args.push("-dependency-file", dependencyPath, "-MT", pchPath);
         const output = await runPchStage(
-          compiler,
+          stages,
           args,
-          directory,
           host,
           requestId,
           pchPath,
@@ -219,8 +237,8 @@ export async function buildClangWithSdkDirect(
       host.trace(requestId, "projectCompile", "end");
       host.trace(requestId, "runtimeShimCompile", "start");
     }
-    const objectPath = `/project/build/${String(index).padStart(4, "0")}.o`;
-    const dependencyPath = `/project/build/${String(index).padStart(4, "0")}.d`;
+    const objectPath = `${GUEST_ROOT}/build/${String(index).padStart(4, "0")}.o`;
+    const dependencyPath = `${GUEST_ROOT}/build/${String(index).padStart(4, "0")}.d`;
     const sourceBytes = projectFiles.get(source);
     if (!sourceBytes) throw new Error(`SDK-direct Clang is missing source bytes for '${source}'.`);
     const baseManifestKey = await objectCache.unitManifestKey(pins, configKey, source, sourceBytes);
@@ -231,7 +249,7 @@ export async function buildClangWithSdkDirect(
     const additionalInputs = unitPchInput ? [unitPchInput] : [];
     const cached = await objectCache.lookup(manifestKey, projectFiles, additionalInputs);
     if (cached) {
-      await directory.writeFile(objectPath.slice("/project".length), cached);
+      await sandbox.fs.writeFile(objectPath, cached);
       objectCacheHits += 1;
       objectPaths.push(objectPath);
       objectInputs.push({ kind: "object", identity: source, bytes: cached });
@@ -245,14 +263,13 @@ export async function buildClangWithSdkDirect(
         0,
         "-include-pch",
         pchPath,
-        ...(admittedPch ? ["-fno-validate-pch"] : []),
+        ...(admittedPch ? ["-fno-validate-pch", "-ivfsoverlay", LIBCXX_PCH_OVERLAY_PATH] : []),
       );
     }
     args.push("-dependency-file", dependencyPath, "-MT", objectPath);
     const output = await runClangStage(
-      compiler,
+      stages,
       args,
-      directory,
       host,
       requestId,
       source === DETERMINISTIC_NATIVE_SOURCE_PATH ? "runtimeShimSpawn" : "projectSpawn",
@@ -291,7 +308,7 @@ export async function buildClangWithSdkDirect(
 
   host.progress(requestId, "linking", "Linking SDK-direct Clang objects", 0.8);
   host.trace(requestId, "link", "start");
-  const outputPath = "/project/build/app.wasm";
+  const outputPath = `${GUEST_ROOT}/build/app.wasm`;
   const linkArguments = instantiateClangLink(config.link, pins.placeholders, objectPaths, outputPath);
   const linkManifestKey = await sha256Hex(JSON.stringify({
     pins: pins.sourceSha256,
@@ -307,9 +324,8 @@ export async function buildClangWithSdkDirect(
   } else {
     linkMisses += 1;
     const linked = await runLinkStage(
-      linker,
+      stages,
       linkArguments,
-      directory,
       host,
       requestId,
       "linkSpawn",
@@ -364,7 +380,7 @@ export async function buildClangWithSdkDirect(
       },
     };
   } finally {
-    directory.free();
+    if (!stages.abandoned) await sandbox.close();
   }
 }
 
@@ -383,29 +399,23 @@ export function restoreSdkDirectClangBuildGraphState(state: IncrementalBuildGrap
   return objectCache.restoreState(state);
 }
 
-/** Release all SDK resources tied to one Runtime while preserving object-cache bytes. */
+/** Forget the package loaded into one SDK client while preserving object-cache bytes. */
 export async function disposeSdkDirectClangToolchain(): Promise<void> {
-  const pending = loadedToolchain;
   loadedToolchain = undefined;
-  if (!pending) return;
-  const { pkg, compiler, linker } = await pending;
-  compiler.free();
-  linker.free();
-  pkg.free();
 }
 
 async function ensureToolchain(
   requestId: string,
   host: SdkDirectClangHost,
 ): Promise<LoadedToolchain> {
-  if (loadedToolchain) {
+  if (loadedToolchain?.wasmer === host.wasmer) {
     for (const operation of ["toolchainFetch", "toolchainDecode", "toolchainLoad"] as const) {
       host.trace(requestId, operation, "start");
       host.trace(requestId, operation, "end");
     }
-    return loadedToolchain;
+    return loadedToolchain.toolchain;
   }
-  loadedToolchain = (async () => {
+  const pending = (async () => {
     host.trace(requestId, "toolchainFetch", "start");
     const [packageBytes, pinsBytes] = await Promise.all([
       host.loadToolchainAsset(CLANG_PACKAGE_ASSET_PATH),
@@ -420,24 +430,23 @@ async function ensureToolchain(
     }
     host.trace(requestId, "toolchainDecode", "end");
     host.trace(requestId, "toolchainLoad", "start");
-    const pkg = await Wasmer.fromFile(packageBytes, host.runtime);
-    const compiler = requireCommand(pkg, pins.command);
-    const linker = requireCommand(pkg, pins.linkerCommand);
+    const pkg = await host.wasmer.packages.load(packageBytes);
+    for (const command of [pins.command, pins.linkerCommand]) {
+      if (!pkg.commands.includes(command)) {
+        throw new Error(`The SDK-direct Clang package does not expose '${command}'.`);
+      }
+    }
     host.trace(requestId, "toolchainLoad", "end");
-    return { pkg, pins, compiler, linker };
+    return { pkg, pins };
   })();
+  const entry = { wasmer: host.wasmer, toolchain: pending };
+  loadedToolchain = entry;
   try {
-    return await loadedToolchain;
+    return await pending;
   } catch (error) {
-    loadedToolchain = undefined;
+    if (loadedToolchain === entry) loadedToolchain = undefined;
     throw error;
   }
-}
-
-function requireCommand(pkg: Wasmer, name: string): Command {
-  const selected = pkg.commands[name];
-  if (!selected) throw new Error(`The SDK-direct Clang package does not expose '${name}'.`);
-  return selected;
 }
 
 async function loadLibcxxPch(
@@ -478,48 +487,50 @@ function findPrecompiledHeader(project: Project): string | undefined {
   return headers[0];
 }
 
-function runPchStage(
-  command: Command,
+interface ClangStages {
+  compiler: string;
+  linker: string;
+  sandbox: Sandbox;
+  abandoned: boolean;
+}
+
+async function runPchStage(
+  stages: ClangStages,
   args: string[],
-  directory: Directory,
   host: SdkDirectClangHost,
   requestId: string,
   outputPath: string,
   dependencyPath: string,
 ): Promise<ClangPchStageResult> {
-  const stability = new MountedOutputStabilityObserver();
-  return runUntilOutputReady(
-    command,
-    args,
-    directory,
+  const observed = await runStage(
+    stages,
+    stages.compiler,
+    [...guestArguments(args), ...PREFIX_MAPS],
     host,
     requestId,
     "projectSpawn",
     "projectWait",
     "projectOutputReady",
-    async (capturedStderr) => {
-      const [snapshot, dependency] = await Promise.all([
-        readOptionalFile(directory, outputPath),
-        readOptionalFile(directory, dependencyPath),
+    async (succeeded) => {
+      if (!succeeded) return {};
+      const [pch, dependency] = await Promise.all([
+        readOptionalFile(stages.sandbox, outputPath),
+        readOptionalFile(stages.sandbox, dependencyPath),
       ]);
-      const pch = stability.observe(snapshot?.byteLength ? snapshot : undefined, performance.now());
-      if (pch && dependency?.byteLength && decoder.decode(dependency).endsWith("\n")) {
-        return { pch, dependency };
-      }
-      return /\d+ errors? generated\.\s*$/.test(capturedStderr) ? {} : undefined;
+      return pch?.byteLength && dependency?.byteLength ? { pch, dependency } : {};
     },
-  ).then((observed) => ({
+  );
+  return {
     ...observed.value,
     diagnostics: parseClangDiagnostics(`${observed.stderr}\n${observed.stdout}`),
     stdout: observed.stdout,
     stderr: observed.stderr,
-  }));
+  };
 }
 
-function runClangStage(
-  command: Command,
+async function runClangStage(
+  stages: ClangStages,
   args: string[],
-  directory: Directory,
   host: SdkDirectClangHost,
   requestId: string,
   spawnOperation: CompilerTraceOperation,
@@ -528,37 +539,35 @@ function runClangStage(
   outputPath: string,
   dependencyPath: string,
 ): Promise<ClangStageResult> {
-  return runUntilOutputReady(
-    command,
-    args,
-    directory,
+  const observed = await runStage(
+    stages,
+    stages.compiler,
+    [...guestArguments(args), ...PREFIX_MAPS],
     host,
     requestId,
     spawnOperation,
     waitOperation,
     outputReadyOperation,
-    async (capturedStderr) => {
+    async (succeeded) => {
+      if (!succeeded) return {};
       const [object, dependency] = await Promise.all([
-        readValidWasmFile(directory, outputPath),
-        readOptionalFile(directory, dependencyPath),
+        readValidWasmFile(stages.sandbox, outputPath),
+        readOptionalFile(stages.sandbox, dependencyPath),
       ]);
-      if (object && dependency?.byteLength && decoder.decode(dependency).endsWith("\n")) {
-        return { object, dependency };
-      }
-      return /\d+ errors? generated\.\s*$/.test(capturedStderr) ? {} : undefined;
+      return object && dependency?.byteLength ? { object, dependency } : {};
     },
-  ).then((observed) => ({
+  );
+  return {
     ...observed.value,
     diagnostics: parseClangDiagnostics(`${observed.stderr}\n${observed.stdout}`),
     stdout: observed.stdout,
     stderr: observed.stderr,
-  }));
+  };
 }
 
 function runLinkStage(
-  command: Command,
+  stages: ClangStages,
   args: string[],
-  directory: Directory,
   host: SdkDirectClangHost,
   requestId: string,
   spawnOperation: CompilerTraceOperation,
@@ -566,135 +575,72 @@ function runLinkStage(
   outputReadyOperation: CompilerTraceOperation,
   outputPath: string,
 ): Promise<StageObservation<Uint8Array | undefined>> {
-  return runUntilOutputReady(
-    command,
-    args,
-    directory,
+  return runStage(
+    stages,
+    stages.linker,
+    guestArguments(args),
     host,
     requestId,
     spawnOperation,
     waitOperation,
     outputReadyOperation,
-    async (capturedStderr) => {
-      const output = await readValidWasmFile(directory, outputPath);
-      if (output) return output;
-      return /(?:wasm-ld|lld): error:/i.test(capturedStderr) ? null : undefined;
-    },
-  ).then((observed) => ({ ...observed, value: observed.value ?? undefined }));
+    async (succeeded) => succeeded ? readValidWasmFile(stages.sandbox, outputPath) : undefined,
+  );
 }
 
-async function runUntilOutputReady<T>(
-  command: Command,
+async function runStage<T>(
+  stages: ClangStages,
+  command: string,
   args: string[],
-  directory: Directory,
   host: SdkDirectClangHost,
   requestId: string,
   spawnOperation: CompilerTraceOperation,
   waitOperation: CompilerTraceOperation,
   outputReadyOperation: CompilerTraceOperation,
-  probe: (capturedStderr: string) => Promise<T | null | undefined>,
-): Promise<StageObservation<T | null>> {
+  readOutput: (succeeded: boolean) => Promise<T>,
+): Promise<StageObservation<T>> {
   host.trace(requestId, spawnOperation, "start");
-  const instance = await command.run({
+  const running = runSandboxCommand(stages.sandbox, stages, {
+    command,
     args,
-    cwd: "/project",
-    env: {
-      PATH: "/bin",
-      SOURCE_DATE_EPOCH: "946684800",
-      TZ: "UTC",
-      LC_ALL: "C",
-    },
-    mount: { "/project": directory },
+    cwd: GUEST_ROOT,
+    timeoutMs: STAGE_OUTPUT_TIMEOUT_MS,
+    timeoutMessage: `Compiler stage did not complete within ${STAGE_OUTPUT_TIMEOUT_MS} ms.`,
   });
   host.trace(requestId, spawnOperation, "end");
   host.trace(requestId, waitOperation, "start");
   host.trace(requestId, outputReadyOperation, "start");
-  const stdoutCapture = captureReadable(instance.stdout);
-  const stderrCapture = captureReadable(instance.stderr);
-  const deadline = performance.now() + STAGE_OUTPUT_TIMEOUT_MS;
   try {
-    while (performance.now() < deadline) {
-      const result = await probe(stderrCapture.text());
-      if (result !== undefined) {
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        return {
-          value: result,
-          stdout: stdoutCapture.text(),
-          stderr: stderrCapture.text(),
-        };
-      }
-      await new Promise<void>((resolve) => setTimeout(resolve, 5));
-    }
-    throw new Error(`Compiler stage did not produce a complete output within ${STAGE_OUTPUT_TIMEOUT_MS} ms.`);
+    const output = await running;
+    return {
+      value: await readOutput(output.ok),
+      stdout: decoder.decode(output.stdout),
+      stderr: decoder.decode(output.stderr),
+    };
   } finally {
     host.trace(requestId, outputReadyOperation, "end");
     host.trace(requestId, waitOperation, "end");
-    await Promise.all([stdoutCapture.cancel(), stderrCapture.cancel()]);
-    instance.free();
   }
 }
 
-function captureReadable(stream: ReadableStream): { text(): string; cancel(): Promise<void> } {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  void (async () => {
-    try {
-      while (true) {
-        const result = await reader.read();
-        if (result.done) return;
-        const bytes = result.value instanceof Uint8Array
-          ? result.value
-          : new Uint8Array(result.value as ArrayBuffer);
-        chunks.push(bytes.slice());
-      }
-    } catch {
-      // Cancellation is expected when a complete mounted output is observed.
-    }
-  })();
-  return {
-    text: () => decoder.decode(concatenate(chunks)),
-    cancel: async () => {
-      try {
-        await reader.cancel();
-      } catch {
-        // The process may have closed the stream between observation and cancellation.
-      }
-    },
-  };
+function guestArguments(args: readonly string[]): string[] {
+  return args.map((argument) => (
+    argument === PINNED_GUEST_ROOT || argument.startsWith(`${PINNED_GUEST_ROOT}/`)
+      ? `${GUEST_ROOT}${argument.slice(PINNED_GUEST_ROOT.length)}`
+      : argument
+  ));
 }
 
-function concatenate(chunks: readonly Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return output;
-}
-
-async function readValidWasmFile(directory: Directory, guestPath: string): Promise<Uint8Array | undefined> {
-  const bytes = await readOptionalFile(directory, guestPath);
+async function readValidWasmFile(sandbox: Sandbox, guestPath: string): Promise<Uint8Array | undefined> {
+  const bytes = await readOptionalFile(sandbox, guestPath);
   if (!bytes || bytes.byteLength <= 8) return undefined;
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return WebAssembly.validate(copy.buffer) ? copy : undefined;
+  const copy = new Uint8Array(bytes);
+  return WebAssembly.validate(copy) ? copy : undefined;
 }
 
-async function ensureDirectory(directory: Directory, path: string): Promise<void> {
+async function readOptionalFile(sandbox: Sandbox, guestPath: string): Promise<Uint8Array | undefined> {
   try {
-    await directory.createDir(path);
-  } catch (error) {
-    if (!String(error).toLowerCase().includes("exist")) throw error;
-  }
-}
-
-async function readOptionalFile(directory: Directory, guestPath: string): Promise<Uint8Array | undefined> {
-  const mountRelativePath = guestPath.startsWith("/project/")
-    ? guestPath.slice("/project".length)
-    : guestPath;
-  try {
-    return await directory.readFile(mountRelativePath);
+    return await sandbox.fs.readFile(guestPath);
   } catch {
     return undefined;
   }

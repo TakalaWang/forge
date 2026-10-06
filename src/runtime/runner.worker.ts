@@ -1,10 +1,10 @@
 /// <reference lib="webworker" />
 
-import { Runtime, Wasmer, init } from "@wasmer/sdk";
-import wasmerWasmUrl from "@wasmer/sdk/wasm?url";
+import type { Wasmer } from "@wasmer/sdk";
 import { WASM_OJ_STORAGE } from "@/src/core/contract";
 import { sha256Hex } from "@/src/core/hash";
 import {
+  PYTHON_COMMAND_SHA256,
   PYTHON_COMPRESSED_PACKAGE_SHA256,
   PYTHON_PACKAGE,
   PYTHON_PACKAGE_ASSET_PATH,
@@ -46,34 +46,25 @@ import {
   openOptionalRuntimeFilesCache,
   restoreOrExportRuntimeFiles,
 } from "@/src/runtime/runtime-files-cache";
-import {
-  PackageHandleCache,
-  WasmerPackageHandle,
-  withHandleLease,
-  withWasmerCommand,
-} from "@/src/runner/package-handle-cache";
+import { readWebcAtom } from "@/src/runner/webc";
 import initRuntimeCore, {
   interact_wasm_oj as interactWasmOjCore,
   run_wasm_oj as runWasmOjCore,
 } from "@/src/runner/generated/runtime-core.js";
 import runtimeCoreWasmUrl from "@/src/runner/generated/runtime-core_bg.wasm?url";
-import {
-  createModuleWorkerBootstrap,
-  type ModuleWorkerBootstrap,
-  moduleWorkerBaseUrl,
-} from "./module-worker";
-import wasmerThreadWorkerUrl from "./wasmer-thread.worker?worker&url";
+import { moduleWorkerBaseUrl } from "./module-worker";
+import { createBrowserWasmer } from "./wasmer-sdk";
 import { loadBrowserRuntimeDriverPlugins } from "./browser-runtime-plugin";
 import type { BrowserRuntimeDriverPlugin } from "@/src/core/types";
 
 const scope: DedicatedWorkerGlobalScope = self as unknown as DedicatedWorkerGlobalScope;
 const workerBaseUrl = moduleWorkerBaseUrl();
 const decoder = new TextDecoder();
-const packages = new PackageHandleCache<string, WasmerPackageHandle>();
+const RUNTIME_FILES_OUTPUT_LIMIT_BYTES = 256 * 1024 * 1024;
 const packageFileSystems = new Map<string, Promise<Record<string, Uint8Array>>>();
-let sdkRuntime: Runtime | undefined;
-let sdkRuntimeInitialization: Promise<Runtime> | undefined;
-let wasmerThreadWorkerBootstrap: ModuleWorkerBootstrap | undefined;
+let sdkClient: Promise<Wasmer> | undefined;
+let pythonPackageBytes: Promise<Uint8Array> | undefined;
+let pythonCommand: Promise<Uint8Array> | undefined;
 let runtimeDrivers: RuntimeDriverRegistry | undefined;
 let quickJsBytes: Promise<Uint8Array> | undefined;
 let toolchainSources: readonly BrowserToolchainSource[] | undefined;
@@ -163,32 +154,15 @@ async function initializeRuntime(
   progress(requestId, "initializing", "Deterministic Wasmer runner ready", 1);
 }
 
-async function ensurePackageRuntime(): Promise<Runtime> {
-  if (sdkRuntime) return sdkRuntime;
-  sdkRuntimeInitialization ??= (async () => {
-    const bootstrap = createModuleWorkerBootstrap(new URL(wasmerThreadWorkerUrl, workerBaseUrl));
-    wasmerThreadWorkerBootstrap = bootstrap;
-    try {
-      await init({
-        log: "warn",
-        module: new URL(wasmerWasmUrl, workerBaseUrl),
-        workerUrl: bootstrap.url,
-      });
-      const initialized = new Runtime({ registry: null });
-      sdkRuntime = initialized;
-      return initialized;
-    } catch (error) {
-      if (wasmerThreadWorkerBootstrap === bootstrap) wasmerThreadWorkerBootstrap = undefined;
-      bootstrap.revoke();
-      throw error;
-    }
-  })();
-  try {
-    return await sdkRuntimeInitialization;
-  } catch (error) {
-    sdkRuntimeInitialization = undefined;
-    throw error;
-  }
+function ensureSdkClient(): Promise<Wasmer> {
+  const cached = sdkClient;
+  if (cached) return cached;
+  const pending = createBrowserWasmer({ outputBytes: RUNTIME_FILES_OUTPUT_LIMIT_BYTES });
+  sdkClient = pending;
+  void pending.catch(() => {
+    if (sdkClient === pending) sdkClient = undefined;
+  });
+  return pending;
 }
 
 function toolchainAssetUrl(path: string): URL {
@@ -232,22 +206,44 @@ async function loadCompressedAsset(
   return bytes;
 }
 
-function acquirePackage(specifier: string) {
+function loadPinnedPackage(specifier: string): Promise<Uint8Array> {
   if (specifier !== PYTHON_PACKAGE) {
     throw new Error(`No pinned WASM-OJ runtime package is declared for '${specifier}'.`);
   }
-  return packages.acquire(specifier, async () => {
-    const [bytes, runtime] = await Promise.all([
-      loadCompressedAsset(
-        PYTHON_PACKAGE_ASSET_PATH,
-        "Python/WASI package",
-        PYTHON_COMPRESSED_PACKAGE_SHA256,
-        PYTHON_PACKAGE_SHA256,
-      ),
-      ensurePackageRuntime(),
-    ]);
-    return new WasmerPackageHandle(await Wasmer.fromFile(bytes, runtime));
+  const cached = pythonPackageBytes;
+  if (cached) return cached;
+  const pending = loadCompressedAsset(
+    PYTHON_PACKAGE_ASSET_PATH,
+    "Python/WASI package",
+    PYTHON_COMPRESSED_PACKAGE_SHA256,
+    PYTHON_PACKAGE_SHA256,
+  );
+  pythonPackageBytes = pending;
+  void pending.catch(() => {
+    if (pythonPackageBytes === pending) pythonPackageBytes = undefined;
   });
+  return pending;
+}
+
+function loadPackageCommand(specifier: string, command: string): Promise<Uint8Array> {
+  if (specifier !== PYTHON_PACKAGE || command !== "python") {
+    throw new Error(`No pinned WASM-OJ runtime command is declared for '${specifier}:${command}'.`);
+  }
+  const cached = pythonCommand;
+  if (cached) return cached;
+  const pending = (async () => {
+    const bytes = readWebcAtom(await loadPinnedPackage(specifier), command).slice();
+    const digest = await sha256Hex(bytes);
+    if (digest !== PYTHON_COMMAND_SHA256) {
+      throw new Error(`Pinned ${specifier} command '${command}' has digest ${digest}; expected ${PYTHON_COMMAND_SHA256}.`);
+    }
+    return bytes;
+  })();
+  pythonCommand = pending;
+  void pending.catch(() => {
+    if (pythonCommand === pending) pythonCommand = undefined;
+  });
+  return pending;
 }
 
 function runtimeFilesCacheRequest(request: PackageFileSystemRequest): Request {
@@ -274,27 +270,27 @@ async function exportPackageFileSystem(
         expectedSha256: request.expectedSha256,
       },
       async () => {
-        const lease = await acquirePackage(request.packageSpecifier);
-        const output = await withHandleLease(
-          lease,
-          (pkg) => withWasmerCommand(pkg, request.command, async (command) => {
-            const instance = await command.run({
-              args: request.args,
-              env: {
-                PYTHONHOME: "/usr/local",
-                PYTHONHASHSEED: "0",
-                PYTHONDONTWRITEBYTECODE: "1",
-              },
-            });
-            return instance.wait();
-          }),
-        );
-        if (!output.ok) {
+        const [packageBytes, wasmer] = await Promise.all([
+          loadPinnedPackage(request.packageSpecifier),
+          ensureSdkClient(),
+        ]);
+        const sandbox = await wasmer.sandboxes.create({
+          packages: [await wasmer.packages.load(packageBytes)],
+          env: {
+            PYTHONHOME: "/usr/local",
+            PYTHONHASHSEED: "0",
+            PYTHONDONTWRITEBYTECODE: "1",
+          },
+        });
+        const output = await sandbox.command(request.command, request.args).run({ check: false });
+        await sandbox.close();
+        if (!output.ok || output.stdout.truncated) {
           throw new Error(
-            `Unable to export runtime files from ${request.packageSpecifier}: exit ${output.code}: ${output.stderr}`,
+            `Unable to export runtime files from ${request.packageSpecifier}: `
+            + `${output.reason} ${output.exitCode}: ${output.stderr.text()}`,
           );
         }
-        return output.stdoutBytes.slice();
+        return output.stdout.bytes;
       },
     );
   })();
@@ -327,20 +323,16 @@ const resolver: RuntimeResolver = {
     return loadQuickJs();
   },
   async packageCommand(packageSpecifier, commandName) {
-    const lease = await acquirePackage(packageSpecifier);
-    return withHandleLease(
-      lease,
-      (pkg) => withWasmerCommand(pkg, commandName, (command) => command.binary()),
-    );
+    return (await loadPackageCommand(packageSpecifier, commandName)).slice();
   },
   packageFileSystem: exportPackageFileSystem,
 };
 
 async function clearRuntimeCaches(): Promise<void> {
-  const packageRetirement = packages.retireAll();
   packageFileSystems.clear();
   quickJsBytes = undefined;
-  await packageRetirement.wait();
+  pythonPackageBytes = undefined;
+  pythonCommand = undefined;
   await caches.delete(WASM_OJ_STORAGE.runtimeFilesCache);
 }
 

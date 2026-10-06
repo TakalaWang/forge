@@ -50,7 +50,6 @@
   "dependencies": {
     "@wasm-oj/contracts": "workspace:0.2.3",
     "@wasm-oj/core": "workspace:0.2.3",
-    "@wasmer/sdk": "0.10.0",
     "es-module-lexer": "2.3.1",
     "fflate": "0.8.3"
   }

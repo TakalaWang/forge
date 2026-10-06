@@ -25,7 +25,7 @@ describe("ClangObjectCache", () => {
     const key = await cache.unitManifestKey(pins, "c-release", "src/main.c", files.get("src/main.c")!);
     await expect(cache.store(
       key,
-      ["src/main.c", "/project/src/value.h", "/sysroot/include/stdio.h"],
+      ["src/main.c", "/workspace/src/value.h", "/sysroot/include/stdio.h"],
       files,
       new Uint8Array([1, 2, 3]),
     )).resolves.toBe(true);

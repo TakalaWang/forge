@@ -39,7 +39,6 @@ export const CODE_PACKAGES = Object.freeze([
     runtimeDependencies: [
       "@wasm-oj/contracts",
       "@wasm-oj/core",
-      "@wasmer/sdk",
       "es-module-lexer",
       "fflate",
     ],

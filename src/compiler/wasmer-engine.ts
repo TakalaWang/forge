@@ -1,8 +1,4 @@
-import {
-  Runtime,
-  Wasmer,
-  type Output,
-} from "@wasmer/sdk";
+import type { Package, Wasmer } from "@wasmer/sdk";
 import { WASM_OJ_CONTRACT_VERSION } from "../core/contract.ts";
 import {
   canonicalRuntimeBundleFiles,
@@ -44,6 +40,7 @@ import type {
 import type { GoCompileRequest, GoCompileResult } from "./go-toolchain.ts";
 import type { JavaCompileRequest, JavaCompileResult } from "./java-toolchain.ts";
 import { buildClangWithSdkDirect } from "./sdk-direct-clang.ts";
+import { runSandboxCommand } from "./sandbox-command.ts";
 import {
   assertProjectDependencyEcosystem,
   goDependencyInput,
@@ -52,10 +49,12 @@ import {
   rustDependencyInput,
 } from "./dependency-input.ts";
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 let typescriptCompilerBytes: Promise<Uint8Array> | undefined;
+let typescriptCompiler: { wasmer: Wasmer; pkg: Promise<Package> } | undefined;
 
 export interface WasmerCompilerHost {
-  getRuntime(): Runtime;
+  getWasmer(): Wasmer;
   loadToolchainAsset(path: string): Promise<Uint8Array>;
   loadToolchainFile(path: string): Promise<Uint8Array>;
   compileRust(request: RustCompileRequest): Promise<RustCompileResult>;
@@ -80,16 +79,21 @@ function requireHost(): WasmerCompilerHost {
   return host;
 }
 
-function requireRuntime(): Runtime {
-  return requireHost().getRuntime();
-}
-
-async function getTypeScriptCompiler(): Promise<Wasmer> {
-  typescriptCompilerBytes ??= requireHost().loadToolchainAsset(TYPESCRIPT_ASSET_PATH);
+async function getTypeScriptCompiler(): Promise<Package> {
+  const wasmer = requireHost().getWasmer();
+  if (typescriptCompiler?.wasmer !== wasmer) {
+    typescriptCompilerBytes ??= requireHost().loadToolchainAsset(TYPESCRIPT_ASSET_PATH);
+    const bytes = typescriptCompilerBytes;
+    typescriptCompiler = { wasmer, pkg: bytes.then((value) => wasmer.packages.load(value)) };
+  }
+  const pending = typescriptCompiler;
   try {
-    return Wasmer.fromWasm(await typescriptCompilerBytes, requireRuntime());
+    return await pending.pkg;
   } catch (error) {
-    typescriptCompilerBytes = undefined;
+    if (typescriptCompiler === pending) {
+      typescriptCompiler = undefined;
+      typescriptCompilerBytes = undefined;
+    }
     throw error;
   }
 }
@@ -307,17 +311,24 @@ interface TypeScriptWasiResponse {
   files: Record<string, string>;
 }
 
-async function transpileScriptProject(project: Project, requestId: string): Promise<{ files: Record<string, string | Uint8Array>; output: Output; response?: TypeScriptWasiResponse }> {
+interface TypeScriptWasiOutput {
+  ok: boolean;
+  stderr: string;
+}
+
+async function transpileScriptProject(project: Project, requestId: string): Promise<{ files: Record<string, string | Uint8Array>; output: TypeScriptWasiOutput; response?: TypeScriptWasiResponse }> {
   const scriptFiles = scriptSourceFiles(project);
   const emittedFiles = emittedSourceFiles(project);
   const dependencyFiles = npmDependencyFiles(project);
   progress(requestId, "loading-toolchain", `Loading TypeScript ${TYPESCRIPT_VERSION}/WASI`);
   const compiler = await getTypeScriptCompiler();
-  const entrypoint = compiler.entrypoint;
-  if (!entrypoint) throw new Error("The TypeScript/WASI compiler has no executable entrypoint.");
+  if (!compiler.entrypoint) throw new Error("The TypeScript/WASI compiler has no executable entrypoint.");
   const outputPaths = emittedFiles.map((file) => emittedScriptPath(file.path));
   const declarationPath = "/project/.wasm-oj/quickjs.d.ts";
-  const instance = await entrypoint.run({
+  const sandbox = await requireHost().getWasmer().sandboxes.create({ packages: [compiler] });
+  const completed = await runSandboxCommand(sandbox, { abandoned: false }, {
+    command: compiler,
+    args: [],
     stdin: JSON.stringify({
       files: {
         ...Object.fromEntries(project.files.map((file) => [`/project/${file.path}`, file.content])),
@@ -337,11 +348,12 @@ async function transpileScriptProject(project: Project, requestId: string): Prom
       outputs: outputPaths.map((path) => `/project/build/${path}`),
     }),
   });
-  const output = await instance.wait();
+  await sandbox.close();
+  const output = { ok: completed.ok, stderr: decoder.decode(completed.stderr) };
   let response: TypeScriptWasiResponse | undefined;
   if (output.ok) {
     try {
-      response = JSON.parse(output.stdout) as TypeScriptWasiResponse;
+      response = JSON.parse(decoder.decode(completed.stdout)) as TypeScriptWasiResponse;
     } catch {
       response = undefined;
     }
@@ -440,7 +452,7 @@ export async function buildProject(project: Project, cacheKey: string, requestId
   if (canonicalProject.config.language === "c" || canonicalProject.config.language === "cpp") {
     const activeHost = requireHost();
     return buildClangWithSdkDirect(canonicalProject, cacheKey, requestId, {
-      runtime: activeHost.getRuntime(),
+      wasmer: activeHost.getWasmer(),
       loadToolchainAsset: activeHost.loadToolchainAsset,
       loadToolchainFile: activeHost.loadToolchainFile,
       progress: activeHost.progress,
@@ -479,4 +491,5 @@ languageDrivers.register({
 
 export function clearCompilerHostCaches(): void {
   typescriptCompilerBytes = undefined;
+  typescriptCompiler = undefined;
 }

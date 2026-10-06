@@ -34,18 +34,18 @@ function contract(overrides: Record<string, unknown> = {}) {
 describe("Rust linker argument contract", () => {
   it("validates and instantiates the pinned optimization-specific templates", () => {
     const decoded = decodeRustLinkerArgumentContract(contract());
-    expect(instantiateRustLinkerArguments(decoded, "debug", "/work/build/main.allocator.rcgu.bc")).toEqual([
+    expect(instantiateRustLinkerArguments(decoded, "debug", "/workspace/build/main.allocator.rcgu.bc")).toEqual([
       "--shared-memory",
       "/rust/lib/rustlib/wasm32-wasip1-threads/lib/self-contained/crt1-command.o",
       RUST_OBJECT_PATH,
-      "/work/build/main.allocator.rcgu.bc",
+      "/workspace/build/main.allocator.rcgu.bc",
       "/rust/lib/rustlib/wasm32-wasip1-threads/lib/libstd-example.rlib",
       "-o",
       RUST_FINAL_OUTPUT_PATH,
       "--gc-sections",
       "-O0",
     ]);
-    expect(instantiateRustLinkerArguments(decoded, "release", "/work/build/main.allocator.rcgu.bc")).toContain("-O2");
+    expect(instantiateRustLinkerArguments(decoded, "release", "/workspace/build/main.allocator.rcgu.bc")).toContain("-O2");
   });
 
   it.each([

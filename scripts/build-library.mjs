@@ -30,6 +30,7 @@ import {
 import { resolveTypeScriptCli } from "./typescript-cli.mjs";
 
 import { buildQuickJsStdlib } from "./build-quickjs-stdlib.mjs";
+import { wasmerSdkRuntime } from "./wasmer-sdk-runtime.mjs";
 
 const run = promisify(execFile);
 const alias = { "@": repositoryRoot };
@@ -96,7 +97,7 @@ async function buildSourcePackage(definition, stagingDir) {
     publicDir: false,
     plugins: definition.name === "@wasm-oj/contracts" ? [] : [contractsBoundaryPlugin()],
     resolve: { alias },
-    worker: { format: "es" },
+    worker: { format: "es", plugins: () => [wasmerSdkRuntime()] },
     build: {
       outDir: stagingDir,
       emptyOutDir: false,

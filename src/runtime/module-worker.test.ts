@@ -82,13 +82,13 @@ describe("module Worker bootstrap", () => {
   });
 
   it("keeps a reusable bootstrap alive until its owner explicitly revokes it", async () => {
-    const bootstrap = createModuleWorkerBootstrap("/assets/wasmer-thread.worker.js");
+    const bootstrap = createModuleWorkerBootstrap("/assets/wasmer-sdk/dist/browser-worker.js");
 
     expect(bootstrap.url).toBe("blob:https://wasm-oj.example/bootstrap");
     expect(URL.revokeObjectURL).not.toHaveBeenCalled();
     const source = vi.mocked(URL.createObjectURL).mock.calls[0]?.[0];
     expect(await (source as Blob).text()).toContain(
-      'await import("https://wasm-oj.example/assets/wasmer-thread.worker.js")',
+      'await import("https://wasm-oj.example/assets/wasmer-sdk/dist/browser-worker.js")',
     );
 
     bootstrap.revoke();
