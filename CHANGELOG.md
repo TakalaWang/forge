@@ -4,6 +4,15 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/) and the contract/package versioning policy in
 [the versioning policy](docs/versioning.md).
 
+## Unreleased
+
+- Fixed interactive metering so contestants and interactors are charged exactly what a
+  standalone run charges for the same code. The host meter omitted the per-block cost of the
+  in-module gas function, so tight loops cost up to 11 times less and CPU-bound contestants ran
+  until the wall deadline instead of stopping at their instruction budget. Interactive charges
+  are also about twice as fast. Interactive costs rise to the standalone values, and the refreshed
+  runtime identity changes cost profiles.
+
 ## 0.2.3 - 2026-10-05
 
 - Download pinned browser toolchain assets before the compiler timeout starts, so slow

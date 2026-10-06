@@ -130,6 +130,32 @@ describe.skipIf(!enabled)("real server judge contracts", () => {
     });
   });
 
+  it("meters an interactive contestant exactly like a standalone run", { timeout: 300_000 }, async () => {
+    const contestant = await compileC("spinner", [
+        "int main(void) {",
+        "  volatile unsigned long long sink = 0;",
+        "  for (unsigned long long i = 0; i < 3000000ULL; ++i) sink = sink + i;",
+        "  return (int)(sink & 1);",
+        "}",
+      ].join("\n"));
+    const interactor = await compileC("silent-interactor", "int main(void) { return 0; }");
+    const execute = async (instructionBudget: number) => {
+      const resources = { instructionBudget, wallTimeLimitMs: 60_000 };
+      const standalone = await engine.run(contestant, { resources });
+      const interactive = await engine.interact(contestant, interactor, { contestant: { resources } });
+      return { standalone, interactive: interactive.contestant };
+    };
+
+    const unlimited = await execute(1_000_000_000);
+    expect(unlimited.standalone).toMatchObject({ code: 0, termination: "exited" });
+    expect(unlimited.interactive).toMatchObject({ code: 0, termination: "exited" });
+    expect(unlimited.interactive.metrics.cost).toBe(unlimited.standalone.metrics.cost);
+
+    const limited = await execute(unlimited.standalone.metrics.cost! - 1);
+    expect(limited.standalone.termination).toBe("instruction-limit");
+    expect(limited.interactive.termination).toBe("instruction-limit");
+  });
+
   async function compileC(name: string, source: string): Promise<BuildArtifact> {
     const entry = `src/${name}.c`;
     const input: CompileInput = {

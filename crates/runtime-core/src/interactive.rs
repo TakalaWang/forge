@@ -20,6 +20,7 @@ use crate::{
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
@@ -38,49 +39,43 @@ use wasmer_wasix::{
 #[derive(Debug)]
 struct GasBudget {
     initial: u64,
-    state: Mutex<GasState>,
-}
-
-#[derive(Debug)]
-struct GasState {
-    remaining: u64,
-    exhausted: bool,
+    call_cost: u64,
+    remaining: AtomicU64,
+    exhausted: AtomicBool,
 }
 
 impl GasBudget {
-    fn new(initial: u64) -> Self {
+    fn new(initial: u64, call_cost: u64) -> Self {
         Self {
             initial,
-            state: Mutex::new(GasState {
-                remaining: initial,
-                exhausted: false,
-            }),
+            call_cost,
+            remaining: AtomicU64::new(initial),
+            exhausted: AtomicBool::new(false),
         }
     }
 
     fn charge(&self, amount: u64) -> Result<(), RuntimeError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
-        if amount > state.remaining {
-            state.remaining = 0;
-            state.exhausted = true;
+        let amount = amount.saturating_add(self.call_cost);
+        if self
+            .remaining
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(amount)
+            })
+            .is_err()
+        {
+            self.remaining.store(0, Ordering::Relaxed);
+            self.exhausted.store(true, Ordering::Relaxed);
             return Err(RuntimeError::new("WASM-OJ instruction budget exhausted"));
         }
-        state.remaining -= amount;
         Ok(())
     }
 
-    fn metrics(&self) -> Result<(u64, bool), RunError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|error| RunError::Runtime(error.to_string()))?;
-        Ok((
-            self.initial.saturating_sub(state.remaining),
-            state.exhausted,
-        ))
+    fn metrics(&self) -> (u64, bool) {
+        (
+            self.initial
+                .saturating_sub(self.remaining.load(Ordering::Relaxed)),
+            self.exhausted.load(Ordering::Relaxed),
+        )
     }
 }
 
@@ -383,7 +378,7 @@ fn prepare_program(
 ) -> Result<PreparedProgram, RunError> {
     let limited = enforce_memory_limit(&program.wasm, program.resources.memory_limit_bytes)
         .map_err(RunError::Compile)?;
-    let metered =
+    let (metered, call_cost) =
         instrument_wasm_with_host_meter(&limited, metering_module).map_err(RunError::Compile)?;
     let executable = defer_start_section(&metered.wasm).map_err(RunError::Compile)?;
     let wasm =
@@ -397,7 +392,10 @@ fn prepare_program(
     Ok(PreparedProgram {
         wasm,
         operations: metered.operations,
-        gas: Arc::new(GasBudget::new(program.resources.instruction_budget)),
+        gas: Arc::new(GasBudget::new(
+            program.resources.instruction_budget,
+            call_cost,
+        )),
         protocol,
         stderr,
         filesystem,
@@ -448,7 +446,7 @@ fn process_result(
 ) -> Result<InteractiveProcessResult, RunError> {
     let stderr = prepared.stderr.bytes();
     let output_exceeded = prepared.protocol.exceeded() || prepared.stderr.exceeded();
-    let (cost, exhausted) = prepared.gas.metrics()?;
+    let (cost, exhausted) = prepared.gas.metrics();
     let logical_time_exceeded = prepared.clock.limit_exceeded()?;
     let (code, termination) = if prepared.filesystem.quota_exceeded() {
         (137, ExecutionTermination::FilesystemLimit)
@@ -673,7 +671,7 @@ mod tests {
     use super::interact;
     use crate::{
         DeterminismConfig, ExecutionTermination, InteractiveProgram, InteractiveRequest,
-        ResourcePolicy,
+        ResourcePolicy, RunRequest,
     };
     use std::collections::BTreeMap;
 
@@ -996,6 +994,72 @@ mod tests {
         assert_eq!(result.contestant.termination, ExecutionTermination::Exited);
         assert_eq!(result.contestant.metrics.logical_time_ns, 0);
         assert_eq!(result.interactor.metrics.logical_time_ns, 0);
+    }
+
+    #[test]
+    fn interactive_contestant_is_metered_like_a_standalone_run() {
+        let looping = wat::parse_str(
+            r#"(module
+              (memory (export "memory") 1)
+              (func (export "_start")
+                (local $remaining i32)
+                i32.const 1000 local.set $remaining
+                (loop $again
+                  local.get $remaining i32.const 1 i32.sub local.tee $remaining
+                  br_if $again)))"#,
+        )
+        .unwrap();
+        let idle =
+            wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+                .unwrap();
+        let determinism = DeterminismConfig {
+            random_seed: 7,
+            realtime_epoch_ms: 946_684_800_000,
+            clock_step_ns: 1_000_000,
+        };
+        let execute = |instruction_budget: u64| {
+            let mut contestant = program(looping.clone());
+            contestant.resources.instruction_budget = instruction_budget;
+            let standalone = crate::run(RunRequest {
+                wasm: contestant.wasm.clone(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                stdin: Vec::new(),
+                files: BTreeMap::new(),
+                output_paths: Vec::new(),
+                cwd: contestant.cwd.clone(),
+                startup_entropy_bytes: 0,
+                determinism: determinism.clone(),
+                resources: contestant.resources.clone(),
+            })
+            .unwrap();
+            let interactive = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(interact(InteractiveRequest {
+                    contestant,
+                    interactor: program(idle.clone()),
+                    determinism: determinism.clone(),
+                }))
+                .unwrap();
+            (standalone, interactive.contestant)
+        };
+
+        let (standalone, interactive) = execute(1_000_000);
+        assert_eq!(standalone.termination, ExecutionTermination::Exited);
+        assert_eq!(interactive.termination, ExecutionTermination::Exited);
+        assert_eq!(interactive.metrics.cost, standalone.metrics.cost);
+
+        let (standalone, interactive) = execute(standalone.metrics.cost - 1);
+        assert_eq!(
+            standalone.termination,
+            ExecutionTermination::InstructionLimit
+        );
+        assert_eq!(
+            interactive.termination,
+            ExecutionTermination::InstructionLimit
+        );
     }
 
     fn program(wasm: Vec<u8>) -> InteractiveProgram {

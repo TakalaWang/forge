@@ -1,7 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 use js_sys::{BigInt, WebAssembly};
 use meter_wasmparser::Operator;
-use radix_wasm_instrument::gas_metering::{self, MemoryGrowCost, Rules};
+use radix_wasm_instrument::gas_metering::{self, Backend, GasMeter, MemoryGrowCost, Rules};
 use radix_wasm_instrument::utils::module_info::ModuleInfo;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -85,15 +85,24 @@ pub fn instrument_wasm(wasm: &[u8], budget: u64) -> Result<InstrumentedModule, S
     })
 }
 
+/// Also returns the weighted cost `instrument_wasm` adds to every charge for its own gas function,
+/// which the host must add to each call so both meters report the same cost.
 pub(crate) fn instrument_wasm_with_host_meter(
     wasm: &[u8],
     metering_module: &'static str,
-) -> Result<InstrumentedModule, String> {
+) -> Result<(InstrumentedModule, u64), String> {
     let runtime_sections = runtime_custom_sections(wasm)?;
     let executable = canonicalize_custom_sections(wasm)?;
     let operations = inspect_weighted_opcodes(&executable)?;
     let mut module = ModuleInfo::new(&executable)
         .map_err(|error| format!("failed to parse module for weighted metering: {error}"))?;
+    let GasMeter::Internal {
+        cost: call_cost, ..
+    } = gas_metering::mutable_global::Injector::new(METERING_MODULE, GAS_COUNTER_NAME)
+        .gas_meter(&mut module, &WeightedRules)
+    else {
+        return Err("weighted metering has no in-module gas function cost".to_string());
+    };
     let backend = gas_metering::host_function::Injector::new(metering_module, HOST_GAS_FUNCTION);
     let mut metered = gas_metering::inject(&mut module, backend, &WeightedRules)
         .map_err(|error| format!("failed to inject weighted host metering: {error}"))?;
@@ -105,10 +114,13 @@ pub(crate) fn instrument_wasm_with_host_meter(
         metered.push(section.id());
         section.encode(&mut metered);
     }
-    Ok(InstrumentedModule {
-        wasm: metered,
-        operations,
-    })
+    Ok((
+        InstrumentedModule {
+            wasm: metered,
+            operations,
+        },
+        call_cost,
+    ))
 }
 
 #[derive(Debug)]
