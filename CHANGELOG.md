@@ -16,6 +16,10 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 - Accept runtime-bundle interactors (for example CPython) in `Runner.interact` on the server
   and in the browser runner Worker. Either side of an interactive session may now be a
   standalone Wasm module or a runtime bundle that provides streaming fd 0.
+- Fixed Python runtime preparation occasionally stalling until its 300 s timeout. The Wasmer
+  SDK can terminate its workers before stdout/stderr reach EOF even though the whole runtime
+  file archive has arrived, so server and browser preparation now finish once the
+  self-delimiting archive is complete instead of waiting for `Instance.wait()`.
 
 ## 0.2.3 - 2026-10-05
 

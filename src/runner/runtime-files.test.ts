@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../core/hash";
-import { decodeRuntimeFiles, verifyAndDecodeRuntimeFiles } from "./runtime-files";
+import {
+  decodeRuntimeFiles,
+  readRuntimeFilesExport,
+  verifyAndDecodeRuntimeFiles,
+} from "./runtime-files";
 
 const encoder = new TextEncoder();
 
@@ -57,5 +61,58 @@ describe("runtime file archives", () => {
     await expect(verifyAndDecodeRuntimeFiles(corrupted, expected)).rejects.toThrow(
       `expected ${expected}`,
     );
+  });
+});
+
+function outputStream(chunks: readonly Uint8Array[], end: boolean) {
+  const state = { cancelled: false };
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      if (end) controller.close();
+    },
+    cancel() {
+      state.cancelled = true;
+    },
+  });
+  return { stream, state };
+}
+
+function split(bytes: Uint8Array, size: number): Uint8Array[] {
+  const chunks: Uint8Array[] = [];
+  for (let offset = 0; offset < bytes.byteLength; offset += size) {
+    chunks.push(bytes.slice(offset, offset + size));
+  }
+  return chunks;
+}
+
+describe("runtime file exports", () => {
+  it("returns a complete archive even when stdout and stderr never reach EOF", async () => {
+    const expected = archive([
+      ["/cpython/lib/python314.zip", "stdlib".repeat(100)],
+      ["/cpython/lib/python3.14/os.py", "os"],
+    ]);
+    const stdout = outputStream(split(expected, 7), false);
+    const stderr = outputStream([], false);
+    let stdinClosed = false;
+
+    const bytes = await readRuntimeFilesExport({
+      stdin: new WritableStream({ close: () => { stdinClosed = true; } }),
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(bytes).toEqual(expected);
+    expect(stdinClosed).toBe(true);
+    expect(stdout.state.cancelled).toBe(true);
+    expect(stderr.state.cancelled).toBe(true);
+  });
+
+  it("reports stderr when stdout ends before the archive is complete", async () => {
+    const complete = archive([["/cpython/lib/python314.zip", "stdlib"]]);
+    await expect(readRuntimeFilesExport({
+      stdout: outputStream([complete.subarray(0, complete.byteLength - 1)], true).stream,
+      stderr: outputStream([encoder.encode("Traceback: boom")], true).stream,
+    })).rejects.toThrow("Traceback: boom");
   });
 });
