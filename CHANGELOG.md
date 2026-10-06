@@ -4,6 +4,26 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/) and the contract/package versioning policy in
 [the versioning policy](docs/versioning.md).
 
+## Unreleased
+
+- Upgraded `@wasmer/sdk` from 0.10.0 to 0.19.0. Clang, rustc, TypeScript, and Python
+  runtime-file preparation now run to exit in per-build SDK sandboxes, which removes the
+  0.10.0 race that could leave a finished process waiting forever for output EOF and stall
+  Python preparation or TypeScript compilation under load. Compiled artifacts are unchanged.
+- `@wasm-oj/browser` ships the SDK's browser runtime files unbundled under
+  `assets/wasmer-sdk-<digest>/` and no longer installs `@wasmer/sdk`. Hosts that copy the
+  package's `dist/assets/` must copy that directory recursively. The SDK's WISP networking
+  module is not shipped, and its host-function trampoline is built without `eval`, so
+  execution still works under a strict Content Security Policy.
+- Python execution reads the interpreter module directly from the pinned WEBC package and
+  verifies its digest.
+- Raw Clang output names `/workspace/...` instead of `/project/...` source paths. Parsed
+  diagnostics and emitted artifacts are unchanged.
+- The runtime identity changes with the SDK, so artifacts cached by earlier releases are
+  rebuilt.
+- `@wasmer/sdk` 0.19.0 is distributed under Wasmer's Modified MIT License, which adds an
+  attribution condition for large commercial deployments; see `THIRD_PARTY_NOTICES.md`.
+
 ## 0.2.3 - 2026-10-05
 
 - Download pinned browser toolchain assets before the compiler timeout starts, so slow

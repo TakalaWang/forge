@@ -125,9 +125,15 @@ nested stages with bounded lifetime. Python and JavaScript package source files 
 crossing a stage budget, cancellation, timeout, restart, cache clearing, disposal, or infrastructure
 failure establishes a complete Worker-generation boundary.
 
-Wasmer secondary Workers are host implementation details. They use the SDK's supported `workerUrl`
-protocol and do not grant guest thread-spawn capability. The host page must be cross-origin
-isolated.
+Compiler and runtime-preparation processes use the official `@wasmer/sdk`. `@wasm-oj/browser` ships
+its browser runtime files unbundled under `assets/wasmer-sdk-<digest>/`, without the SDK's WISP
+networking module, and Workers import the SDK from there. SDK thread Workers are host implementation
+details: they start from the same same-origin blob bootstrap as other module Workers and do not
+grant guest thread-spawn capability. The host page must be cross-origin isolated.
+
+SDK processes run to exit; WASM-OJ never calls the SDK's process kill or client shutdown, which
+terminate threads at arbitrary points. Cancellation and timeouts discard the whole Worker generation
+or server child instead.
 
 ## Server execution boundary
 

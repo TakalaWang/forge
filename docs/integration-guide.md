@@ -102,6 +102,10 @@ The page must be cross-origin isolated: COOP `same-origin`, COEP `require-corp`,
 `same-origin`, and `worker-src 'self' blob:` are required. Cross-origin asset servers must emit
 compatible CORS/CORP headers.
 
+`@wasm-oj/browser` resolves its Workers and the `assets/wasmer-sdk-<digest>/` runtime directory
+relative to its own `dist/assets/` files. Hosts that copy those assets instead of bundling them must
+copy the directory recursively and keep its layout.
+
 ### Prefetching a toolchain
 
 `BrowserCompiler` downloads a build's pinned toolchain assets before its build boundary (60 s for

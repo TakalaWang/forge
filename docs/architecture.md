@@ -79,20 +79,22 @@ arguments for `wasm32-unknown-wasip1`. Both public `wasip1` and `wasix` profiles
 compiler ABI; `wasix` changes artifact/cache/runtime-profile identity, not emitted bytes for
 identical input. The runner validates actual module imports.
 
-Browser compilation directly invokes packaged atoms. Successful clean translation units enter a
-content-addressed dependency graph. The browser persists a digest-verified graph in IndexedDB;
-warning-producing units are rebuilt because diagnostics cannot be reconstructed faithfully.
+Browser compilation directly invokes packaged atoms in a per-build SDK sandbox whose project root is
+`/workspace`; macro and debug prefix maps keep the pinned `/project` paths in emitted objects.
+Successful clean translation units enter a content-addressed dependency graph. The browser persists
+a digest-verified graph in IndexedDB; warning-producing units are rebuilt because diagnostics cannot
+be reconstructed faithfully.
 `wasm-oj.pch.hpp` selects a separately pinned debug/release libc++ PCH only when its content equals
 `WASM_OJ_LIBCXX_PCH_HEADER` exactly.
 
 ### Rust
 
 The Rust package contains rustc 1.91.1-dev, its matching `wasm32-wasip1-threads` standard library,
-and pinned wasm-ld resources. A browser stage keeps verified immutable package/command handles warm
-while creating fresh project directories and command instances for each build. rustc emits the
-crate object plus allocator bitcode; a fresh linker command produces the standalone Wasm artifact.
-The generation is recycled before its output-ready stage budget is exceeded. Server compilation
-uses the same content and arguments in a one-shot child.
+and pinned wasm-ld resources. A browser stage keeps its SDK client and verified immutable package
+warm while creating a fresh sandbox for each build. rustc emits the crate object plus allocator
+bitcode; a fresh linker process produces the standalone Wasm artifact. The generation is recycled
+before its stage budget is exceeded. Server compilation uses the same content and arguments in a
+one-shot child.
 
 The resulting shared-memory module remains a `wasip1` artifact. The host supplies imported memory
 but denies guest thread spawning.
