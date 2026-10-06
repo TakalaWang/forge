@@ -49,21 +49,28 @@ canonical Go module `h1:` hash over module ZIP entries.
 
 ### Wasmer JavaScript SDK
 
-- Component: `@wasmer/sdk` 0.10.0
-- npm integrity: `sha512-YQ+s5tGag6P/I8kp9BTH+XhjoS9UFvWiZJvnWEEovClHffhYToKhprWr4UJG7wLP7c/2HQpGkF7ZrjoUvKjdmA==`
-- Source revision: `wasmerio/wasmer-js@93b8b738ebd3ee57e118da0f0eb795b97d5b999e`
+- Component: `@wasmer/sdk` 0.19.0
+- npm integrity: `sha512-4gdWiIlne8ti3dQl1yD6jrLLNKrQXmZXA6iy6ta/6sgYpixPLwymeGqhMzjAIHqhmwrD+SjPFpZ5ugd9SytDrQ==`
+- Source revision: `wasmerio/wasmer-sdk@7e69332b7f65dbc5584d64bb79f547eaf4302b69`
 - Locked Rust graph: `Cargo.lock` SHA-256
-  `d352926f3f05e3d4308c4e261711d07db568e5c2b4387067180f920da074791f`
-- Source: <https://github.com/wasmerio/wasmer-js/tree/93b8b738ebd3ee57e118da0f0eb795b97d5b999e>
-- License: MIT
-- License material: `licenses/wasmer-sdk-MIT.txt`,
+  `34156a76319127aa4152e8b25bd92a5657f7ddc0669ba3e26209cc57053f56a1`
+- Source: <https://github.com/wasmerio/wasmer-sdk/tree/7e69332b7f65dbc5584d64bb79f547eaf4302b69>
+- License: Wasmer Modified MIT License. It adds one condition to MIT: a commercial product or
+  service with more than 1 million monthly active users or more than 1 million US dollars in
+  monthly revenue must prominently display "Wasmer" in its user interface.
+- Bundled JavaScript dependency: `acorn` 8.18.0 (MIT), shipped in the SDK's wasm-bindgen snippets
+- License material: `licenses/wasmer-sdk-LICENSE.txt`, `licenses/wasmer-sdk-acorn-MIT.txt`,
   `licenses/wasmer-sdk-dependencies.html`, and
   `licenses/wasmer-sdk-dependencies.json`
 
-WASM-OJ consumes the official npm artifact without patching the installed
-package. The generated dependency report covers every package in the pinned
-normal Cargo dependency graph selected for `wasm32-unknown-unknown`; its compact
-inventory binds all 332 package identities and the exact HTML report digest.
+WASM-OJ ships the official npm runtime files unbundled. Its only modification replaces the
+wasm-bindgen glue's `new Function` construction of Wasmer's fixed host-function trampoline with
+the equivalent closure so the SDK runs under a strict Content Security Policy. The browser build
+omits the SDK's WISP networking module, the only path to its AGPL-3.0 `@mercuryworkshop/wisp-js`
+dependency, which WASM-OJ therefore does not distribute. The generated dependency report covers
+every package in the pinned normal Cargo dependency graph of the SDK's `wasmer-sdk-js` crate
+selected for `wasm32-unknown-unknown`; its compact inventory binds all 316 package identities and
+the exact HTML report digest.
 
 ### QuickJS guest Node standard I/O libraries
 

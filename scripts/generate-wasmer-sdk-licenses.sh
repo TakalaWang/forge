@@ -4,10 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CARGO_ABOUT="${CARGO_ABOUT:-cargo-about}"
 EXPECTED_ABOUT_VERSION="cargo-about 0.9.1"
-RUST_TOOLCHAIN="1.91.1"
-SOURCE_REVISION="93b8b738ebd3ee57e118da0f0eb795b97d5b999e"
-SOURCE_REPOSITORY="https://github.com/wasmerio/wasmer-js.git"
-EXPECTED_LOCK_SHA256="d352926f3f05e3d4308c4e261711d07db568e5c2b4387067180f920da074791f"
+RUST_TOOLCHAIN="1.97.1"
+SOURCE_REVISION="7e69332b7f65dbc5584d64bb79f547eaf4302b69"
+SOURCE_REPOSITORY="https://github.com/wasmerio/wasmer-sdk.git"
+EXPECTED_LOCK_SHA256="34156a76319127aa4152e8b25bd92a5657f7ddc0669ba3e26209cc57053f56a1"
 
 if ! command -v "$CARGO_ABOUT" >/dev/null 2>&1; then
   echo "cargo-about 0.9.1 is required. Install it with:" >&2
@@ -39,7 +39,7 @@ RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" cargo fetch \
 COMMON=(
   generate
   --config "$ROOT/scripts/wasmer-sdk-about.toml"
-  --manifest-path "$WORK/source/Cargo.toml"
+  --manifest-path "$WORK/source/js/bindgen/Cargo.toml"
   --locked
   --offline
   --target wasm32-unknown-unknown

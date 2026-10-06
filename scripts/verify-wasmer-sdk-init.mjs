@@ -3,23 +3,26 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readPnpmLock, requireLockedPackage } from "./pnpm-lock.mjs";
+import { wasmerSdkRuntimeFiles } from "./wasmer-sdk-runtime.mjs";
 
-const EXPECTED_VERSION = "0.10.0";
-const EXPECTED_INTEGRITY = "sha512-YQ+s5tGag6P/I8kp9BTH+XhjoS9UFvWiZJvnWEEovClHffhYToKhprWr4UJG7wLP7c/2HQpGkF7ZrjoUvKjdmA==";
+const EXPECTED_VERSION = "0.19.0";
+const EXPECTED_INTEGRITY = "sha512-4gdWiIlne8ti3dQl1yD6jrLLNKrQXmZXA6iy6ta/6sgYpixPLwymeGqhMzjAIHqhmwrD+SjPFpZ5ugd9SytDrQ==";
 const EXPECTED_FILES = Object.freeze({
-  "dist/index.mjs": "d5e0424d9de8173c0c7bc6a6b704aecde620d3f424050e0e6a079d863a44d58b",
-  "dist/node.mjs": "6896c497347069f69432241648d5c64b4d265d689504a48e9804022139ac0dda",
-  "dist/wasmer_js_bg.wasm": "49a6646209f5ab5e7c737eac33407d87d9a9959ac83e5ecaaab9261b2323589e",
-  "package.json": "5c207c6ff1fc02bd633a13461a77d7f8fe47d14494cf2192763226f39cab373b",
+  "dist/browser-worker.js": "775223c87ff60c22515e88945e1152c02f7bfa49898edab748e89e573ec4d439",
+  "dist/index.js": "8a4753fcc7bda778da38a9f3e8ecfaae52497e0756f8a1f06da9f87a2ecf2c11",
+  "dist/node.js": "0a917fce4d5b22e8d39d746e9c2ae0a37715802d712e6f0f67486919b237412c",
+  "pkg/wasmer_sdk_js.js": "b8f330f47fcbc48541af65985b2db63116f220231a3225e9ec347c5f74dcfa35",
+  "pkg/wasmer_sdk_js_bg.wasm": "86aefc8940d29045f94646421bec6fac528a736aa4e78718fdb7924897ee4c25",
+  "package.json": "19570be326d74717571202df1a0b8998d991e07e5bafb77655eca78bdc99cf24",
 });
-const EXPECTED_SOURCE_REVISION = "93b8b738ebd3ee57e118da0f0eb795b97d5b999e";
-const EXPECTED_CARGO_LOCK_SHA256 = "d352926f3f05e3d4308c4e261711d07db568e5c2b4387067180f920da074791f";
+const EXPECTED_SOURCE_REVISION = "7e69332b7f65dbc5584d64bb79f547eaf4302b69";
+const EXPECTED_CARGO_LOCK_SHA256 = "34156a76319127aa4152e8b25bd92a5657f7ddc0669ba3e26209cc57053f56a1";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const rootPackage = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 const lock = await readPnpmLock(root);
-const sdkPackagePath = fileURLToPath(import.meta.resolve("@wasmer/sdk/package.json"));
-const sdkRoot = path.dirname(sdkPackagePath);
+const sdkRoot = path.dirname(path.dirname(fileURLToPath(import.meta.resolve("@wasmer/sdk/browser"))));
+const sdkPackagePath = path.join(sdkRoot, "package.json");
 const sdkPackage = JSON.parse(await readFile(sdkPackagePath, "utf8"));
 const licenseInventoryPath = path.join(root, "licenses/wasmer-sdk-dependencies.json");
 const licenseReportPath = path.join(root, "licenses/wasmer-sdk-dependencies.html");
@@ -100,25 +103,19 @@ if (packageIdentities.size < 300 || licenseReportBytes.byteLength < 100_000) {
   throw new Error("The Wasmer SDK dependency license closure is unexpectedly incomplete.");
 }
 
-const { Runtime, init } = await import("@wasmer/sdk/node");
-const browserSdk = await import("@wasmer/sdk");
-if (typeof browserSdk.ThreadPoolWorker !== "function") {
-  throw new Error("The official Wasmer SDK does not expose its required ThreadPoolWorker primitive.");
+const runtimeFiles = await wasmerSdkRuntimeFiles();
+for (const relative of ["dist/index.js", "dist/browser-worker.js", "pkg/wasmer_sdk_js.js", "pkg/wasmer_sdk_js_bg.wasm"]) {
+  if (!runtimeFiles.has(relative)) throw new Error(`The shipped Wasmer SDK runtime omits '${relative}'.`);
 }
-// SDK 0.10.0 internally invokes its wasm-bindgen loader through the deprecated
-// positional form and therefore emits an upstream warning. Keep
-// it visible: the verifier proves functionality without mutating or masking
-// the official package.
-await init({ log: "error" });
-const runtime = new Runtime({ registry: null });
-try {
-  if (!(runtime instanceof Runtime) || runtime.__getClassname() !== "JsRuntime") {
-    throw new Error("The official Wasmer SDK did not construct a Runtime instance.");
-  }
-} finally {
-  runtime.free();
+if ([...runtimeFiles.keys()].some((relative) => relative.includes("wisp"))) {
+  throw new Error("The shipped Wasmer SDK runtime must not include the WISP networking module.");
 }
 
+const { Wasmer } = await import("@wasmer/sdk/node");
+const wasmer = await new Wasmer({ cache: false }).ready();
+if (!(wasmer instanceof Wasmer)) throw new Error("The official Wasmer SDK did not construct a client.");
+
 process.stdout.write(
-  `Verified official @wasmer/sdk ${EXPECTED_VERSION} integrity and Runtime initialization.\n`,
+  `Verified official @wasmer/sdk ${EXPECTED_VERSION} integrity, shipped runtime files, and client initialization.\n`,
 );
+process.exit(0);

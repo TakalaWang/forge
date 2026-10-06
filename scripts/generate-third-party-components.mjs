@@ -399,18 +399,19 @@ const definitions = [
   {
     id: "wasmer-sdk",
     name: "Wasmer JavaScript SDK and locked Rust dependency closure",
-    version: "0.10.0",
+    version: "0.19.0",
     source: {
-      url: "https://github.com/wasmerio/wasmer-js",
-      revision: "93b8b738ebd3ee57e118da0f0eb795b97d5b999e",
+      url: "https://github.com/wasmerio/wasmer-sdk",
+      revision: "7e69332b7f65dbc5584d64bb79f547eaf4302b69",
     },
     files: [
       "licenses/wasmer-sdk-dependencies.html",
       "licenses/wasmer-sdk-dependencies.json",
     ],
-    npm: "@wasmer/sdk@0.10.0",
+    npm: "@wasmer/sdk@0.19.0",
     licenses: [
-      "licenses/wasmer-sdk-MIT.txt",
+      "licenses/wasmer-sdk-LICENSE.txt",
+      "licenses/wasmer-sdk-acorn-MIT.txt",
       "licenses/wasmer-sdk-dependencies.html",
       "licenses/wasmer-sdk-dependencies.json",
     ],

@@ -15,9 +15,9 @@ await publishCargoLicenseInventory({
   inventoryPath,
   schema: "wasm-oj-v2/wasmer-sdk-licenses",
   graph: {
-    package: "@wasmer/sdk@0.10.0",
-    sourceRevision: "93b8b738ebd3ee57e118da0f0eb795b97d5b999e",
-    cargoLockSha256: "d352926f3f05e3d4308c4e261711d07db568e5c2b4387067180f920da074791f",
+    package: "@wasmer/sdk@0.19.0",
+    sourceRevision: "7e69332b7f65dbc5584d64bb79f547eaf4302b69",
+    cargoLockSha256: "34156a76319127aa4152e8b25bd92a5657f7ddc0669ba3e26209cc57053f56a1",
     target: "wasm32-unknown-unknown",
     defaultFeatures: true,
     features: [],
