@@ -727,7 +727,7 @@ export class ServerRunner implements Runner {
         const cleanup = (ignoreLateChildError: boolean) => {
           child.off("close", onClose);
           child.off("error", onChildError);
-          child.stdin.off("error", onStdinError);
+          child.stdin.off("error", onStdinError).on("error", () => undefined);
           child.stdout.off("data", onStdout);
           child.stderr.off("data", onStderr);
           this.activePreparationStages.delete(active);
@@ -900,7 +900,7 @@ export class ServerRunner implements Runner {
         clearTimeout(timer);
         child.off("close", onClose);
         child.off("error", onChildError);
-        child.stdin.off("error", onStdinError);
+        child.stdin.off("error", onStdinError).on("error", () => undefined);
         child.stdout.off("data", onStdout);
         child.stderr.off("data", onStderr);
         this.activeNativeRuns.delete(active);
@@ -1018,7 +1018,7 @@ export class ServerRunner implements Runner {
         clearTimeout(timer);
         child.off("close", onClose);
         child.off("error", onChildError);
-        child.stdin.off("error", onStdinError);
+        child.stdin.off("error", onStdinError).on("error", () => undefined);
         child.stdout.off("data", onStdout);
         child.stderr.off("data", onStderr);
         this.activeNativeRuns.delete(active);

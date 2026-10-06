@@ -4,6 +4,12 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/) and the contract/package versioning policy in
 [the versioning policy](docs/versioning.md).
 
+## Unreleased
+
+- Fixed a host process crash (`Uncaught Error: write EPIPE`) when `ServerRunner` cancelled or
+  timed out a runtime preparation stage, run or interactive session while its request was
+  still being written to the child's stdin. Late stdin errors after cleanup are now ignored.
+
 ## 0.2.3 - 2026-10-05
 
 - Download pinned browser toolchain assets before the compiler timeout starts, so slow
