@@ -111,7 +111,7 @@ fn run_in_runtime(request: RunRequest) -> Result<RunResult, RunError> {
 
     let instance = Instance::new(&mut store, &module, &imports)
         .map_err(|error| RunError::Compile(format!("failed to instantiate module: {error}")))?;
-    let meter = meter_state(&mut store, &instance).map_err(RunError::Runtime)?;
+    let meter = meter_state(&instance).map_err(RunError::Runtime)?;
     let guest_memory = instance
         .exports
         .get_memory("memory")

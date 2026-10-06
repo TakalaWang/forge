@@ -6,12 +6,13 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 
 ## Unreleased
 
-- Fixed interactive metering so contestants and interactors are charged exactly what a
-  standalone run charges for the same code. The host meter omitted the per-block cost of the
-  in-module gas function, so tight loops cost up to 11 times less and CPU-bound contestants ran
-  until the wall deadline instead of stopping at their instruction budget. Interactive charges
-  are also about twice as fast. Interactive costs rise to the standalone values, and the refreshed
-  runtime identity changes cost profiles.
+- Interactive contestants and interactors now use the same in-module instruction meter as
+  standalone runs, and the runtime reads each program's counter when it exits. They are charged
+  exactly what a standalone run charges for the same code; the previous host meter left out the
+  meter's own per-block cost, so tight loops cost up to 11 times less. They also run as fast as
+  standalone runs; a tight loop used to run about 18 times slower under `interact`, so CPU-bound
+  contestants hit the wall deadline before their instruction budget. Interactive costs rise to the
+  standalone values, and the refreshed runtime identity changes cost profiles.
 
 ## 0.2.3 - 2026-10-05
 
