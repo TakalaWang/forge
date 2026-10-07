@@ -74,11 +74,13 @@ impl WebGoCompilerSession {
 }
 
 /// Runs one side of an interactive session in the calling Worker. `read`,
-/// `wait` and `write` block on the session's shared ring buffers.
+/// `wait` and `write` block on the session's shared ring buffers; `poll`
+/// checks the input without blocking.
 #[wasm_bindgen]
 pub fn run_interactive_side(
     request: JsValue,
     read: js_sys::Function,
+    poll: js_sys::Function,
     wait: js_sys::Function,
     write: js_sys::Function,
     on_execution: js_sys::Function,
@@ -88,12 +90,16 @@ pub fn run_interactive_side(
         serde_wasm_bindgen::from_value(request).map_err(|error| {
             JsValue::from_str(&format!("invalid interactive side request: {error}"))
         })?;
-    let response = match run_side(request, HostStreams::new(read, wait, write), |running| {
-        on_execution
-            .call1(&JsValue::UNDEFINED, &JsValue::from_bool(running))
-            .map(|_| ())
-            .map_err(|error| RunError::Runtime(format!("execution observer failed: {error:?}")))
-    }) {
+    let response = match run_side(
+        request,
+        HostStreams::new(read, poll, wait, write),
+        |running| {
+            on_execution
+                .call1(&JsValue::UNDEFINED, &JsValue::from_bool(running))
+                .map(|_| ())
+                .map_err(|error| RunError::Runtime(format!("execution observer failed: {error:?}")))
+        },
+    ) {
         Ok(result) => InteractiveSideResponse {
             ok: true,
             result: Some(result),

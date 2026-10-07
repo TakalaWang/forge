@@ -972,6 +972,66 @@ mod tests {
     }
 
     #[test]
+    fn interactive_empty_stdin_poll_times_out_on_the_process_clock() {
+        let poller = wat::parse_str(
+            r#"(module
+              (import "wasi_snapshot_preview1" "poll_oneoff"
+                (func $poll (param i32 i32 i32 i32) (result i32)))
+              (import "wasi_snapshot_preview1" "fd_write"
+                (func $fd_write (param i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (func (export "_start")
+                i32.const 0 i64.const 1 i64.store
+                i32.const 8 i32.const 1 i32.store8
+                i32.const 16 i32.const 0 i32.store
+                i32.const 48 i64.const 2 i64.store
+                i32.const 56 i32.const 0 i32.store8
+                i32.const 64 i32.const 1 i32.store
+                i32.const 72 i64.const 5000000000 i64.store
+                i32.const 80 i64.const 1 i64.store
+                i32.const 88 i32.const 0 i32.store16
+                i32.const 0 i32.const 128 i32.const 2 i32.const 240 call $poll drop
+                i32.const 200 i32.const 138 i32.store
+                i32.const 204 i32.const 1 i32.store
+                i32.const 208 i32.const 240 i32.store
+                i32.const 212 i32.const 1 i32.store
+                i32.const 1 i32.const 200 i32.const 2 i32.const 216 call $fd_write drop))"#,
+        )
+        .unwrap();
+        let listener = wat::parse_str(
+            r#"(module
+              (import "wasi_snapshot_preview1" "fd_read"
+                (func $fd_read (param i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (func (export "_start")
+                (i32.store (i32.const 0) (i32.const 64))
+                (i32.store (i32.const 4) (i32.const 8))
+                (drop (call $fd_read (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 8)))))"#,
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime
+            .block_on(interact(InteractiveRequest {
+                contestant: program(poller),
+                interactor: program(listener),
+                determinism: DeterminismConfig {
+                    random_seed: 7,
+                    realtime_epoch_ms: 946_684_800_000,
+                    clock_step_ns: 1_000_000,
+                },
+            }))
+            .unwrap();
+
+        assert_eq!(result.contestant_to_interactor, [0, 1]);
+        assert_eq!(result.contestant.termination, ExecutionTermination::Exited);
+        assert_eq!(result.contestant.metrics.logical_time_ns, 5_000_000_000);
+        assert_eq!(result.interactor.termination, ExecutionTermination::Exited);
+    }
+
+    #[test]
     fn interactive_contestant_is_metered_like_a_standalone_run() {
         let looping = |ending: &str| {
             wat::parse_str(format!(

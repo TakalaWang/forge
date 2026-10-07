@@ -28,6 +28,39 @@ describe("interactive pipe", () => {
     expect(reader.read(2).byteLength).toBe(0);
   });
 
+  it("returns bytes the writer publishes and closes with after the reader saw an empty buffer", () => {
+    const buffer = createInteractivePipe(16);
+    const writer = new InteractivePipeWriter(buffer);
+    class RacedReader extends InteractivePipeReader {
+      private raced = false;
+
+      protected override buffered(): number {
+        const buffered = super.buffered();
+        if (!this.raced) {
+          this.raced = true;
+          writer.write(bytes("42\n"));
+          writer.close();
+        }
+        return buffered;
+      }
+    }
+    const reader = new RacedReader(buffer);
+    expect(text(reader.read(16))).toBe("42\n");
+    expect(reader.read(16).byteLength).toBe(0);
+  });
+
+  it("polls without blocking", () => {
+    const buffer = createInteractivePipe(16);
+    const writer = new InteractivePipeWriter(buffer);
+    const reader = new InteractivePipeReader(buffer);
+    expect(reader.poll()).toBe(-1);
+    writer.write(bytes("ok"));
+    expect(reader.poll()).toBe(2);
+    expect(text(reader.read(2))).toBe("ok");
+    writer.close();
+    expect(reader.poll()).toBe(0);
+  });
+
   it("fails writes once the reader has closed", () => {
     const buffer = createInteractivePipe(16);
     const writer = new InteractivePipeWriter(buffer);

@@ -28,10 +28,11 @@ pub struct InteractiveSideResult {
     pub protocol: Vec<u8>,
 }
 
-/// Blocking stream callbacks supplied by the side Worker. They wait with
-/// `Atomics.wait`, so reads and writes never return `Pending` to WASIX.
+/// Stream callbacks supplied by the side Worker. Reads and writes wait with
+/// `Atomics.wait`, so they never return `Pending` to WASIX.
 pub struct HostStreams {
     read: js_sys::Function,
+    poll: js_sys::Function,
     wait: js_sys::Function,
     write: js_sys::Function,
 }
@@ -43,8 +44,18 @@ unsafe impl Send for HostStreams {}
 unsafe impl Sync for HostStreams {}
 
 impl HostStreams {
-    pub fn new(read: js_sys::Function, wait: js_sys::Function, write: js_sys::Function) -> Self {
-        Self { read, wait, write }
+    pub fn new(
+        read: js_sys::Function,
+        poll: js_sys::Function,
+        wait: js_sys::Function,
+        write: js_sys::Function,
+    ) -> Self {
+        Self {
+            read,
+            poll,
+            wait,
+            write,
+        }
     }
 
     fn read(&self, maximum: usize) -> io::Result<Vec<u8>> {
@@ -53,6 +64,16 @@ impl HostStreams {
             .call1(&JsValue::UNDEFINED, &JsValue::from(maximum as u32))
             .map_err(host_error)?;
         Ok(js_sys::Uint8Array::new(&chunk).to_vec())
+    }
+
+    fn poll(&self) -> io::Result<Option<usize>> {
+        let available = self
+            .poll
+            .call0(&JsValue::UNDEFINED)
+            .map_err(host_error)?
+            .as_f64()
+            .ok_or_else(|| io::Error::other("interactive input poll returned no size"))?;
+        Ok((available >= 0.0).then_some(available as usize))
     }
 
     fn wait(&self) -> io::Result<usize> {
@@ -215,11 +236,18 @@ impl VirtualFile for StreamInput {
         Some(0)
     }
 
-    fn poll_read_ready(
-        self: Pin<&mut Self>,
-        _context: &mut Context<'_>,
-    ) -> Poll<io::Result<usize>> {
-        Poll::Ready(self.streams.wait())
+    fn poll_read_ready(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<usize>> {
+        if !crate::deterministic::probing_readiness() {
+            return Poll::Ready(self.streams.wait());
+        }
+        match self.streams.poll() {
+            Ok(Some(available)) => Poll::Ready(Ok(available)),
+            Ok(None) => {
+                context.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Err(error) => Poll::Ready(Err(error)),
+        }
     }
 
     fn poll_write_ready(

@@ -3,8 +3,8 @@ import { sha256Hex } from "./sha256.ts";
 
 /** Executable runtime components covered by deterministic cost calibration. */
 export const WASM_OJ_RUNTIME_COMPONENTS = Object.freeze({
-  runtimeCoreWasmSha256: "86287982b80121364907ae0a0abd5ea53e167275ac1766512291f4eee4e53f86",
-  runtimeSourceRootSha256: "8a94919bca56d148b2035b9ffdca7b3f5ab6e7bfa47e003f1cb6551922e7ddc3",
+  runtimeCoreWasmSha256: "63bee2c23edf09c89aae3cfa49c8c6293e780b1a33fe47e5cc55616e44ebccd7",
+  runtimeSourceRootSha256: "77125839d8e8bd743863b59f9097d3a7a4ea3f3b498a5e7e8edce90caa18589c",
   wasmerNativeVersion: "7.2.1",
   wasmerSdkVersion: "0.10.0",
   wasmerSdkWasmSha256: "49a6646209f5ab5e7c737eac33407d87d9a9959ac83e5ecaaab9261b2323589e",
@@ -17,7 +17,7 @@ export const WASM_OJ_RUNTIME_COMPONENTS = Object.freeze({
  * identity is admitted into a calibrated release.
  */
 export const WASM_OJ_RUNTIME_IDENTITY_SHA256 =
-  "1c09fb595a7c05a3f25bcf7359079540f2afa8cf9e36c38c5fdbd96f0a931de4";
+  "32a068c88a3376d7d8b05d3afec1930abe3da15907479eca8a693f541c9f4972";
 
 /** Exact canonical serialization hashed by `WASM_OJ_RUNTIME_IDENTITY_SHA256`. */
 export function runtimeIdentityBytes(): Uint8Array {

@@ -6,6 +6,7 @@ use crate::{
     },
     types::DeterminismConfig,
 };
+use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use wasmer::{
     AsStoreMut, Extern, Function, FunctionEnv, FunctionEnvMut, Imports, Memory, Memory32, Memory64,
@@ -239,6 +240,17 @@ struct PollEnv {
     clock: VirtualClock,
 }
 
+thread_local! {
+    static PROBING_READINESS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the current `poll_oneoff` only probes descriptor readiness because
+/// its clock subscriptions are resolved on the virtual clock afterwards.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn probing_readiness() -> bool {
+    PROBING_READINESS.with(Cell::get)
+}
+
 #[derive(Clone, Copy)]
 struct ClockSubscription {
     subscription: Subscription,
@@ -349,6 +361,7 @@ fn deterministic_poll_oneoff<M: MemorySize>(
                 })
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
         }
+        PROBING_READINESS.with(|probing| probing.set(true));
         let probe = call_original_poll(
             &mut env,
             subscriptions,
@@ -356,6 +369,7 @@ fn deterministic_poll_oneoff<M: MemorySize>(
             subscription_count,
             event_count,
         );
+        PROBING_READINESS.with(|probing| probing.set(false));
         let restore_view = memory.view(&env);
         let restore_input = subscriptions
             .slice(&restore_view, subscription_count)

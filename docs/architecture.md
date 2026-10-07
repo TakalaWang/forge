@@ -56,7 +56,8 @@ restart, timeout, cache clearing, disposal, family switch, and stage-budget exha
 complete browser Worker-generation boundary. Browser interaction runs each side in its own nested
 Worker as a standalone metered run. The two sides exchange bytes through shared-memory ring buffers
 whose reads and writes block with `Atomics.wait`, so neither side ever yields to the other on one
-thread.
+thread. A poll that also waits on a clock checks the input without blocking and, if nothing is
+readable, advances the virtual clock to its deadline, as the server does.
 
 The runner is one Rust codebase compiled to browser Wasm and native executables. Both forms admit
 the same artifacts, deterministic inputs, resource limits, denied capabilities, filesystem model,

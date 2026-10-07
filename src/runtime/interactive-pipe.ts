@@ -44,13 +44,20 @@ class InteractivePipeEnd {
 }
 
 export class InteractivePipeReader extends InteractivePipeEnd {
+  /** Returns the buffered count, 0 at EOF, or -1 while the pipe is empty and the writer is open. */
+  poll(): number {
+    const buffered = this.buffered();
+    if (buffered > 0) return buffered;
+    if (Atomics.load(this.header, WRITER_CLOSED) === 0) return -1;
+    return this.buffered();
+  }
+
   /** Blocks until bytes are buffered or the writer closed; returns the buffered count, or 0 at EOF. */
   wait(): number {
     for (;;) {
       const sequence = this.sequence();
-      const buffered = this.buffered();
-      if (buffered > 0) return buffered;
-      if (Atomics.load(this.header, WRITER_CLOSED) !== 0) return 0;
+      const available = this.poll();
+      if (available >= 0) return available;
       this.sleep(sequence);
     }
   }
