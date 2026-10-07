@@ -16,6 +16,11 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 - Accept runtime-bundle interactors (for example CPython) in `Runner.interact` on the server
   and in the browser runner Worker. Either side of an interactive session may now be a
   standalone Wasm module or a runtime bundle that provides streaming fd 0.
+- Fix browser `Engine.interact`, which failed on every dialogue (#98). Each side now runs in its
+  own nested Worker as a standalone metered run, connected to the other through shared-memory pipes
+  that block with `Atomics.wait`. Browser interactive costs equal `run` costs for the same program.
+  The runner Worker also sends `startupEntropyBytes` for interactive programs. The refreshed
+  runtime identity changes cost profiles.
 
 ## 0.2.3 - 2026-10-05
 

@@ -53,7 +53,10 @@ Browser requests cross dedicated module-Worker boundaries. C/C++ retains bounded
 and content-addressed graph state; Rust and Go use serialized nested stages with bounded generation
 lifetime. Python and JavaScript package source files directly. Server builds use a fresh isolated child. Cancellation,
 restart, timeout, cache clearing, disposal, family switch, and stage-budget exhaustion establish a
-complete browser Worker-generation boundary.
+complete browser Worker-generation boundary. Browser interaction runs each side in its own nested
+Worker as a standalone metered run. The two sides exchange bytes through shared-memory ring buffers
+whose reads and writes block with `Atomics.wait`, so neither side ever yields to the other on one
+thread.
 
 The runner is one Rust codebase compiled to browser Wasm and native executables. Both forms admit
 the same artifacts, deterministic inputs, resource limits, denied capabilities, filesystem model,

@@ -15,6 +15,8 @@ mod native;
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
+pub(crate) mod web_interactive;
+#[cfg(target_arch = "wasm32")]
 pub(crate) mod web_runtime;
 
 pub fn run(request: RunRequest) -> Result<RunResult, RunError> {

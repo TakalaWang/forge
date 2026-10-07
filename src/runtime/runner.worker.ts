@@ -52,16 +52,17 @@ import {
   withHandleLease,
   withWasmerCommand,
 } from "@/src/runner/package-handle-cache";
-import initRuntimeCore, {
-  interact_wasm_oj as interactWasmOjCore,
-  run_wasm_oj as runWasmOjCore,
-} from "@/src/runner/generated/runtime-core.js";
+import initRuntimeCore, { run_wasm_oj as runWasmOjCore } from "@/src/runner/generated/runtime-core.js";
 import runtimeCoreWasmUrl from "@/src/runner/generated/runtime-core_bg.wasm?url";
 import {
+  createModuleWorker,
   createModuleWorkerBootstrap,
   type ModuleWorkerBootstrap,
   moduleWorkerBaseUrl,
 } from "./module-worker";
+import { createInteractivePipe } from "./interactive-pipe";
+import type { InteractiveSideMessage, InteractiveSideStart } from "./interactive-side.worker";
+import interactiveSideWorkerUrl from "./interactive-side.worker?worker&url";
 import wasmerThreadWorkerUrl from "./wasmer-thread.worker?worker&url";
 import { loadBrowserRuntimeDriverPlugins } from "./browser-runtime-plugin";
 import type { BrowserRuntimeDriverPlugin } from "@/src/core/types";
@@ -77,6 +78,7 @@ let wasmerThreadWorkerBootstrap: ModuleWorkerBootstrap | undefined;
 let runtimeDrivers: RuntimeDriverRegistry | undefined;
 let quickJsBytes: Promise<Uint8Array> | undefined;
 let toolchainSources: readonly BrowserToolchainSource[] | undefined;
+let runtimeCoreModule: WebAssembly.Module | undefined;
 
 interface CoreRunResult {
   code: number;
@@ -119,13 +121,11 @@ interface CoreInteractiveProcessResult {
   };
 }
 
-interface CoreInteractiveResponse {
+interface CoreInteractiveSideResponse {
   ok: boolean;
   result?: {
-    contestant: CoreInteractiveProcessResult;
-    interactor: CoreInteractiveProcessResult;
-    contestantToInteractor: Uint8Array;
-    interactorToContestant: Uint8Array;
+    process: CoreInteractiveProcessResult;
+    protocol: Uint8Array;
   };
   error?: { code: string; message: string };
 }
@@ -150,7 +150,8 @@ async function initializeRuntime(
   toolchainSources = snapshotBrowserToolchainSources(sources);
 
   progress(requestId, "initializing", "Starting deterministic Wasmer runner", 0.1);
-  await initRuntimeCore({ module_or_path: new URL(runtimeCoreWasmUrl, workerBaseUrl) });
+  runtimeCoreModule = await compileRuntimeCore();
+  await initRuntimeCore({ module_or_path: runtimeCoreModule });
   runtimeDrivers = createDefaultRuntimeDrivers(
     createExtendedCostBaselineRegistry(additionalCostBaselines),
   );
@@ -161,6 +162,14 @@ async function initializeRuntime(
     }
   }
   progress(requestId, "initializing", "Deterministic Wasmer runner ready", 1);
+}
+
+async function compileRuntimeCore(): Promise<WebAssembly.Module> {
+  const response = await fetch(new URL(runtimeCoreWasmUrl, workerBaseUrl));
+  if (!response.ok) throw new Error(`Unable to load the WASM-OJ runtime core (${response.status}).`);
+  return response.headers.get("Content-Type")?.startsWith("application/wasm")
+    ? WebAssembly.compileStreaming(response)
+    : WebAssembly.compile(await response.arrayBuffer());
 }
 
 async function ensurePackageRuntime(): Promise<Runtime> {
@@ -427,24 +436,90 @@ async function interactArtifacts(
       runtimeDrivers,
     ),
   ]);
-  progress(request.requestId, "running", "Running interactive session with deterministic Wasmer", 0.25);
-  const response = await interactWasmOjCore({
-    contestant: interactiveCoreProgram(contestant),
-    interactor: interactiveCoreProgram(interactor),
-    determinism: request.config.determinism,
-  }) as CoreInteractiveResponse;
-  if (!response.ok || !response.result) {
-    const error = response.error ?? { code: "RUNTIME_ERROR", message: "The interactive runtime returned no result." };
-    throw Object.assign(new Error(error.message), { code: error.code });
-  }
+  const [contestantSide, interactorSide] = await runInteractiveSides(
+    request.requestId,
+    { contestant: interactiveCoreProgram(contestant), interactor: interactiveCoreProgram(interactor) },
+    request.config.determinism,
+  );
   return {
-    contestant: interactiveProcessResult(response.result.contestant, contestant),
-    interactor: interactiveProcessResult(response.result.interactor, interactor),
-    contestantToInteractor: decoder.decode(response.result.contestantToInteractor),
-    interactorToContestant: decoder.decode(response.result.interactorToContestant),
+    contestant: interactiveProcessResult(contestantSide.process, contestant),
+    interactor: interactiveProcessResult(interactorSide.process, interactor),
+    contestantToInteractor: decoder.decode(contestantSide.protocol),
+    interactorToContestant: decoder.decode(interactorSide.protocol),
     durationMs: performance.now() - started,
     determinism: { ...request.config.determinism },
   };
+}
+
+type InteractiveRole = "contestant" | "interactor";
+type CoreInteractiveSide = NonNullable<CoreInteractiveSideResponse["result"]>;
+
+async function runInteractiveSides(
+  requestId: string,
+  programs: Record<InteractiveRole, ReturnType<typeof interactiveCoreProgram>>,
+  determinism: InteractiveRunConfig["determinism"],
+): Promise<[CoreInteractiveSide, CoreInteractiveSide]> {
+  if (!runtimeCoreModule) throw new Error("The WASM-OJ runtime core is not initialized.");
+  const contestantToInteractor = createInteractivePipe();
+  const interactorToContestant = createInteractivePipe();
+  const sides = [
+    startInteractiveSide("contestant", {
+      runtimeCore: runtimeCoreModule,
+      request: { program: programs.contestant, determinism },
+      input: interactorToContestant,
+      output: contestantToInteractor,
+    }),
+    startInteractiveSide("interactor", {
+      runtimeCore: runtimeCoreModule,
+      request: { program: programs.interactor, determinism },
+      input: contestantToInteractor,
+      output: interactorToContestant,
+    }),
+  ] as const;
+  try {
+    void Promise.all(sides.map((side) => side.running)).then(() => {
+      progress(requestId, "running", "Running interactive session with deterministic Wasmer", 0.25);
+    });
+    const results = await Promise.all(sides.map((side) => side.result));
+    progress(requestId, "packaging", "Collecting interactive results", 0.9);
+    return [results[0], results[1]];
+  } finally {
+    for (const side of sides) side.worker.terminate();
+  }
+}
+
+function startInteractiveSide(role: InteractiveRole, start: InteractiveSideStart) {
+  const worker = createModuleWorker(new URL(interactiveSideWorkerUrl, workerBaseUrl), {
+    name: `wasm-oj-interactive-${role}`,
+  });
+  let markRunning!: () => void;
+  const running = new Promise<void>((resolve) => {
+    markRunning = resolve;
+  });
+  const result = new Promise<CoreInteractiveSide>((resolve, reject) => {
+    worker.addEventListener("message", (event: MessageEvent<InteractiveSideMessage>) => {
+      const message = event.data;
+      if (message.type === "running") {
+        markRunning();
+      } else if (message.type === "error") {
+        reject(Object.assign(new Error(`Interactive ${role} failed: ${message.message}`), { code: "RUNTIME_ERROR" }));
+      } else {
+        const response = message.response as CoreInteractiveSideResponse;
+        if (response.ok && response.result) {
+          resolve(response.result);
+        } else {
+          const error = response.error ?? { code: "RUNTIME_ERROR", message: `The interactive ${role} returned no result.` };
+          reject(Object.assign(new Error(error.message), { code: error.code }));
+        }
+      }
+    });
+    worker.addEventListener("error", (event) => {
+      event.preventDefault();
+      reject(Object.assign(new Error(event.message || `The interactive ${role} Worker crashed.`), { code: "RUNTIME_ERROR" }));
+    });
+  });
+  worker.postMessage(start);
+  return { worker, running, result };
 }
 
 function interactiveRunConfig(
@@ -470,6 +545,7 @@ function interactiveCoreProgram(prepared: Awaited<ReturnType<typeof prepareArtif
     env: prepared.env,
     files: prepared.files,
     cwd: prepared.cwd,
+    startupEntropyBytes: prepared.startupEntropyBytes,
     resources: prepared.resources,
   };
 }

@@ -5,10 +5,11 @@ use crate::filesystem::{read_files_bounded, runtime_project_files};
 use crate::meter::{CostPoints, METER_MODEL, instrument_wasm, meter_state, remaining_points};
 use crate::module_imports::attach_imported_memory;
 use crate::module_policy::{DEFERRED_START_EXPORT, defer_start_section, enforce_memory_limit};
-use crate::output::{OutputBudget, OutputCapture};
+use crate::output::{CappedOutput, OutputBudget, OutputCapture};
 use crate::{ExecutionMetrics, ExecutionTermination, RunError, RunRequest, RunResult};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
+use virtual_fs::VirtualFile;
 use wasmer::{Instance, Memory, Module, Store};
 use wasmer_wasix::{
     Pipe, WasiEnv, WasiError, WasiModuleInstanceHandles, WasiModuleTreeHandles, wasmer_wasix_types,
@@ -16,8 +17,29 @@ use wasmer_wasix::{
 
 pub fn run(
     request: RunRequest,
-    mut on_execution: impl FnMut(bool) -> Result<(), RunError>,
+    on_execution: impl FnMut(bool) -> Result<(), RunError>,
 ) -> Result<RunResult, RunError> {
+    let (mut stdin_writer, stdin_reader) = Pipe::channel();
+    stdin_writer
+        .write_all(&request.stdin)
+        .map_err(|error| RunError::Io(error.to_string()))?;
+    drop(stdin_writer);
+    execute(request, Box::new(stdin_reader), None, on_execution).map(|execution| execution.result)
+}
+
+pub(super) type StdoutPeer = Box<dyn FnOnce(CappedOutput) -> Box<dyn VirtualFile + Send + Sync>>;
+
+pub(super) struct Execution {
+    pub result: RunResult,
+    pub exit_code: Option<i32>,
+}
+
+pub(super) fn execute(
+    request: RunRequest,
+    stdin: Box<dyn VirtualFile + Send + Sync>,
+    stdout_peer: Option<StdoutPeer>,
+    mut on_execution: impl FnMut(bool) -> Result<(), RunError>,
+) -> Result<Execution, RunError> {
     let limited = enforce_memory_limit(&request.wasm, request.resources.memory_limit_bytes)
         .map_err(RunError::Compile)?;
     let metered = instrument_wasm(&limited, request.resources.instruction_budget)
@@ -29,11 +51,6 @@ pub fn run(
     })?;
     let runtime = runtime_with_engine(store.engine().clone());
 
-    let (mut stdin_writer, stdin_reader) = Pipe::channel();
-    stdin_writer
-        .write_all(&request.stdin)
-        .map_err(|error| RunError::Io(error.to_string()))?;
-    drop(stdin_writer);
     let output_limit = usize::try_from(request.resources.output_limit_bytes)
         .map_err(|_| RunError::InvalidRequest("output limit exceeds host range".to_string()))?;
     let output_budget = OutputBudget::new(output_limit);
@@ -51,8 +68,11 @@ pub fn run(
         .runtime(runtime)
         .args(request.args.clone())
         .envs(request.env.clone())
-        .stdin(Box::new(stdin_reader))
-        .stdout(Box::new(stdout_file))
+        .stdin(stdin)
+        .stdout(match stdout_peer {
+            Some(peer) => peer(stdout_file),
+            None => Box::new(stdout_file),
+        })
         .stderr(Box::new(stderr_file))
         .fs(filesystem.clone());
     builder
@@ -138,12 +158,14 @@ pub fn run(
     let logical_time_exceeded = clock.limit_exceeded()?;
 
     let mut code = 0;
+    let mut exit_code = None;
     let mut termination = ExecutionTermination::Exited;
     let mut trap_message = None;
     if let Err(error) = execution {
         if let Some(wasi_error) = crate::wasi_error(&error) {
             match wasi_error {
                 WasiError::Exit(exit) => {
+                    exit_code = Some(exit.raw());
                     let errno: wasmer_wasix_types::wasi::Errno = (*exit).into();
                     if errno != wasmer_wasix_types::wasi::Errno::Success {
                         code = errno as i32;
@@ -211,7 +233,7 @@ pub fn run(
         CostPoints::Exhausted => request.resources.instruction_budget,
     };
     let filesystem_metrics = project_filesystem.metrics();
-    Ok(RunResult {
+    let result = RunResult {
         code,
         metrics: ExecutionMetrics {
             cost,
@@ -231,5 +253,6 @@ pub fn run(
         trap_message,
         determinism: request.determinism,
         resources: request.resources,
-    })
+    };
+    Ok(Execution { result, exit_code })
 }

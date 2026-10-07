@@ -15,7 +15,11 @@ export class GoCompilerSession {
     readonly generation: number;
 }
 
-export function interact_wasm_oj(request: any): Promise<any>;
+/**
+ * Runs one side of an interactive session in the calling Worker. `read`,
+ * `wait` and `write` block on the session's shared ring buffers.
+ */
+export function run_interactive_side(request: any, read: Function, wait: Function, write: Function, on_execution: Function): any;
 
 export function run_wasm_oj(request: any, on_execution: Function): any;
 
@@ -28,7 +32,7 @@ export interface InitOutput {
     readonly gocompilersession_digest: (a: number) => [number, number];
     readonly gocompilersession_generation: (a: number) => [number, number, number];
     readonly gocompilersession_new: (a: any) => [number, number, number];
-    readonly interact_wasm_oj: (a: any) => any;
+    readonly run_interactive_side: (a: any, b: any, c: any, d: any, e: any) => [number, number, number];
     readonly run_wasm_oj: (a: any, b: any) => [number, number, number];
     readonly canonical_abi_free: (a: number, b: number, c: number) => void;
     readonly canonical_abi_realloc: (a: number, b: number, c: number, d: number) => number;
