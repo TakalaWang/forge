@@ -13,6 +13,9 @@ All notable changes to WASM-OJ are recorded here. Releases follow
   standalone runs; a tight loop used to run about 18 times slower under `interact`, so CPU-bound
   contestants hit the wall deadline before their instruction budget. Interactive costs rise to the
   standalone values, and the refreshed runtime identity changes cost profiles.
+- Accept runtime-bundle interactors (for example CPython) in `Runner.interact` on the server
+  and in the browser runner Worker. Either side of an interactive session may now be a
+  standalone Wasm module or a runtime bundle that provides streaming fd 0.
 
 ## 0.2.3 - 2026-10-05
 

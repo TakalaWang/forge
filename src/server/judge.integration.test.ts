@@ -177,6 +177,46 @@ describe.skipIf(!enabled)("real server judge contracts", () => {
     expect(result.interactor).toMatchObject({ code: 0, termination: "exited" });
   });
 
+  it("runs a CPython interactor against a compiled contestant", { timeout: 300_000 }, async () => {
+    const contestant = await compileC("bundle-contestant", [
+        "#include <stdio.h>",
+        "int main(void) {",
+        "  int challenge = 0;",
+        "  if (scanf(\"%d\", &challenge) != 1) return 2;",
+        "  printf(\"%d\\n\", challenge + 1);",
+        "  fflush(stdout);",
+        "  return 0;",
+        "}",
+      ].join("\n"));
+    const built = await engine.compile({
+      projectId: "judge-integration:python-interactor",
+      name: "python-interactor",
+      language: "python",
+      entry: "main.py",
+      files: {
+        "main.py": [
+          "import sys",
+          "target = int(open(sys.argv[1]).read())",
+          "print(target - 1, flush=True)",
+          "sys.exit(0 if int(input()) == target else 1)",
+        ].join("\n") + "\n",
+      },
+    }, { cache: false });
+    expect(built.success).toBe(true);
+    expect(built.artifact?.kind).toBe("runtime-bundle");
+
+    const result = await engine.interact(contestant, built.artifact!, {
+      interactor: { args: ["/judge/input.txt"], files: { "/judge/input.txt": "42\n" } },
+    });
+
+    expect(result).toMatchObject({
+      contestantToInteractor: "42\n",
+      interactorToContestant: "41\n",
+      contestant: { code: 0, termination: "exited" },
+      interactor: { code: 0, termination: "exited" },
+    });
+  });
+
   async function compileC(name: string, source: string): Promise<BuildArtifact> {
     const entry = `src/${name}.c`;
     const input: CompileInput = {

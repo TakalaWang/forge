@@ -412,9 +412,6 @@ async function interactArtifacts(
 ): Promise<InteractiveRunResult> {
   const started = performance.now();
   if (!runtimeDrivers) throw new Error("The WASM-OJ runtime-driver registry is not initialized.");
-  if (request.interactor.kind !== "wasm") {
-    throw new Error("Interactive judge artifacts must be standalone Wasm modules.");
-  }
   progress(request.requestId, "loading-toolchain", "Resolving contestant and interactor runtimes", 0.1);
   const [contestant, interactor] = await Promise.all([
     prepareArtifactInteraction(
