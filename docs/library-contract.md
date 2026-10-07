@@ -241,7 +241,8 @@ set/multiset, output-file sets, and standalone sandboxed Wasm checkers.
 
 Interactive cases start contestant and interactor concurrently with full-duplex pipes, independent
 resource policies, process-local deterministic clocks, and secret inputs mounted only on the
-interactor side. Runtime bundles that cannot provide streaming fd 0 are rejected for interaction.
+interactor side. Either side may be a standalone Wasm module or a runtime bundle such as CPython;
+runtime bundles that cannot provide streaming fd 0 are rejected for interaction.
 
 Each case executes under the broad hard policy once. Correct output and the same normalized metrics
 are evaluated against ordered cumulative `baseline`, `efficient`, and `optimal` policies. The

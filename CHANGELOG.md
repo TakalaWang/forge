@@ -4,6 +4,12 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 [Semantic Versioning](https://semver.org/) and the contract/package versioning policy in
 [the versioning policy](docs/versioning.md).
 
+## Unreleased
+
+- Accept runtime-bundle interactors (for example CPython) in `Runner.interact` on the server
+  and in the browser runner Worker. Either side of an interactive session may now be a
+  standalone Wasm module or a runtime bundle that provides streaming fd 0.
+
 ## 0.2.3 - 2026-10-05
 
 - Download pinned browser toolchain assets before the compiler timeout starts, so slow
