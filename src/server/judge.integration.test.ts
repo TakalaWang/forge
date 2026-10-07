@@ -130,6 +130,53 @@ describe.skipIf(!enabled)("real server judge contracts", () => {
     });
   });
 
+  it("meters an interactive contestant exactly like a standalone run", { timeout: 300_000 }, async () => {
+    const contestant = await compileC("spinner", [
+        "int main(void) {",
+        "  volatile unsigned long long sink = 0;",
+        "  for (unsigned long long i = 0; i < 3000000ULL; ++i) sink = sink + i;",
+        "  return (int)(sink & 1);",
+        "}",
+      ].join("\n"));
+    const execute = async (instructionBudget: number) => {
+      const resources = { instructionBudget, wallTimeLimitMs: 60_000 };
+      const standalone = await engine.run(contestant, { resources });
+      const interactive = await engine.interact(contestant, contestant, {
+        contestant: { resources },
+        interactor: { resources },
+      });
+      expect(interactive.interactor).toMatchObject({
+        code: interactive.contestant.code,
+        termination: interactive.contestant.termination,
+        metrics: { cost: interactive.contestant.metrics.cost },
+      });
+      return { standalone, interactive: interactive.contestant };
+    };
+
+    const unlimited = await execute(1_000_000_000);
+    expect(unlimited.standalone).toMatchObject({ code: 0, termination: "exited" });
+    expect(unlimited.interactive).toMatchObject({ code: 0, termination: "exited" });
+    expect(unlimited.interactive.metrics.cost).toBe(unlimited.standalone.metrics.cost);
+
+    const budget = unlimited.standalone.metrics.cost! - 1;
+    const limited = await execute(budget);
+    expect(limited.standalone).toMatchObject({ code: 137, termination: "instruction-limit" });
+    expect(limited.interactive).toMatchObject({ code: 137, termination: "instruction-limit" });
+    expect(limited.interactive.metrics.cost).toBe(budget);
+    expect(limited.interactive.metrics.cost).toBe(limited.standalone.metrics.cost);
+  });
+
+  it("stops a CPU-bound interactive contestant at the default budget well before the wall deadline", { timeout: 300_000 }, async () => {
+    const contestant = await compileC("forever", "int main(void) { for (;;); }");
+    const interactor = await compileC("silent-interactor", "int main(void) { return 0; }");
+    const resources = { wallTimeLimitMs: 6_000 };
+
+    const result = await engine.interact(contestant, interactor, { contestant: { resources }, interactor: { resources } });
+
+    expect(result.contestant).toMatchObject({ code: 137, termination: "instruction-limit" });
+    expect(result.interactor).toMatchObject({ code: 0, termination: "exited" });
+  });
+
   it("runs a CPython interactor against a compiled contestant", { timeout: 300_000 }, async () => {
     const contestant = await compileC("bundle-contestant", [
         "#include <stdio.h>",

@@ -6,6 +6,13 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 
 ## Unreleased
 
+- Interactive contestants and interactors now use the same in-module instruction meter as
+  standalone runs, and the runtime reads each program's counter when it exits. They are charged
+  exactly what a standalone run charges for the same code; the previous host meter left out the
+  meter's own per-block cost, so tight loops cost up to 11 times less. They also run as fast as
+  standalone runs; a tight loop used to run about 18 times slower under `interact`, so CPU-bound
+  contestants hit the wall deadline before their instruction budget. Interactive costs rise to the
+  standalone values, and the refreshed runtime identity changes cost profiles.
 - Accept runtime-bundle interactors (for example CPython) in `Runner.interact` on the server
   and in the browser runner Worker. Either side of an interactive session may now be a
   standalone Wasm module or a runtime bundle that provides streaming fd 0.

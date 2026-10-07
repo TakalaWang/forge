@@ -87,7 +87,7 @@ pub fn run(
         attach_imported_memory(&mut store, &module, &mut imports).map_err(RunError::Compile)?;
     let instance = Instance::new(&mut store, &module, &imports)
         .map_err(|error| RunError::Compile(format!("failed to instantiate module: {error}")))?;
-    let meter = meter_state(&mut store, &instance).map_err(RunError::Runtime)?;
+    let meter = meter_state(&instance).map_err(RunError::Runtime)?;
     let guest_memory = instance
         .exports
         .get_memory("memory")
