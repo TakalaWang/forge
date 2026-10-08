@@ -39,6 +39,7 @@ async function runSide(start: InteractiveSideStart): Promise<void> {
       () => input.poll(),
       () => input.wait(),
       (bytes: Uint8Array) => output.write(bytes),
+      (fd: number) => (fd === 0 ? input : output).close(),
       (running: boolean) => {
         if (running) post({ type: "running" });
       },

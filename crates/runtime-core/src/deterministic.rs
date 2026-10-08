@@ -241,14 +241,20 @@ struct PollEnv {
 }
 
 thread_local! {
-    static PROBING_READINESS: Cell<bool> = const { Cell::new(false) };
+    static STDIN_READINESS_DEFERRALS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Whether the current `poll_oneoff` only probes descriptor readiness because
-/// its clock subscriptions are resolved on the virtual clock afterwards.
+/// Whether an empty stdin readiness check may return `Pending` instead of
+/// blocking. A clock probe never blocks. A poll without a clock grants one
+/// deferral per read subscription, so WASIX reports any other ready
+/// subscription first and blocks on stdin only when it would wait anyway.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn probing_readiness() -> bool {
-    PROBING_READINESS.with(Cell::get)
+pub(crate) fn defer_stdin_readiness() -> bool {
+    STDIN_READINESS_DEFERRALS.with(|deferrals| {
+        let remaining = deferrals.get();
+        deferrals.set(remaining.saturating_sub(1));
+        remaining > 0
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -263,6 +269,7 @@ fn call_original_poll<M: MemorySize>(
     events: WasmPtr<Event, M>,
     subscription_count: M::Offset,
     event_count: WasmPtr<M::Offset, M>,
+    stdin_deferrals: u64,
 ) -> Result<i32, RuntimeError> {
     let Some(original) = env.data().original.clone() else {
         return Ok(Errno::Notsup as i32);
@@ -274,6 +281,7 @@ fn call_original_poll<M: MemorySize>(
             Value::I32(offset as i32)
         }
     };
+    STDIN_READINESS_DEFERRALS.with(|deferrals| deferrals.set(stdin_deferrals));
     let results = original.call(
         env,
         &[
@@ -282,7 +290,9 @@ fn call_original_poll<M: MemorySize>(
             pointer(subscription_count.into()),
             pointer(event_count.offset().into()),
         ],
-    )?;
+    );
+    STDIN_READINESS_DEFERRALS.with(|deferrals| deferrals.set(0));
+    let results = results?;
     match results.as_ref() {
         [Value::I32(errno)] => Ok(*errno),
         _ => Err(RuntimeError::new(
@@ -314,6 +324,7 @@ fn deterministic_poll_oneoff<M: MemorySize>(
     let mut originals = Vec::with_capacity(input.len() as usize);
     let mut clock_subscriptions = Vec::new();
     let mut has_non_clock = false;
+    let mut read_subscriptions = 0;
     for index in 0..input.len() {
         let subscription = input
             .index(index)
@@ -332,6 +343,7 @@ fn deterministic_poll_oneoff<M: MemorySize>(
             });
         } else {
             has_non_clock = true;
+            read_subscriptions += u64::from(subscription.type_ == Eventtype::FdRead);
         }
     }
 
@@ -342,6 +354,7 @@ fn deterministic_poll_oneoff<M: MemorySize>(
             events,
             subscription_count,
             event_count,
+            read_subscriptions,
         );
     }
 
@@ -361,15 +374,14 @@ fn deterministic_poll_oneoff<M: MemorySize>(
                 })
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
         }
-        PROBING_READINESS.with(|probing| probing.set(true));
         let probe = call_original_poll(
             &mut env,
             subscriptions,
             events,
             subscription_count,
             event_count,
+            u64::MAX,
         );
-        PROBING_READINESS.with(|probing| probing.set(false));
         let restore_view = memory.view(&env);
         let restore_input = subscriptions
             .slice(&restore_view, subscription_count)

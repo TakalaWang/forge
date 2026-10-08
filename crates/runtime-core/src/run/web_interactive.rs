@@ -35,6 +35,7 @@ pub struct HostStreams {
     poll: js_sys::Function,
     wait: js_sys::Function,
     write: js_sys::Function,
+    close: js_sys::Function,
 }
 
 // SAFETY: the web build of runtime-core has no threads; these JS handles never
@@ -49,12 +50,14 @@ impl HostStreams {
         poll: js_sys::Function,
         wait: js_sys::Function,
         write: js_sys::Function,
+        close: js_sys::Function,
     ) -> Self {
         Self {
             read,
             poll,
             wait,
             write,
+            close,
         }
     }
 
@@ -97,6 +100,12 @@ impl HostStreams {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         Ok(written as usize)
+    }
+
+    /// Closes the input (fd 0) or output (fd 1) pipe end, so the peer sees
+    /// EOF or a broken pipe at once, as when native drops its pipe end.
+    fn close(&self, fd: u32) {
+        let _ = self.close.call1(&JsValue::UNDEFINED, &JsValue::from(fd));
     }
 }
 
@@ -165,6 +174,14 @@ pub fn run_side(
 
 struct StreamInput {
     streams: Arc<HostStreams>,
+}
+
+// WASIX drops the stdio handle when the last descriptor that refers to it is
+// closed, which is when native drops its `PipeRx` or `PipeTx`.
+impl Drop for StreamInput {
+    fn drop(&mut self) {
+        self.streams.close(0);
+    }
 }
 
 impl std::fmt::Debug for StreamInput {
@@ -237,15 +254,13 @@ impl VirtualFile for StreamInput {
     }
 
     fn poll_read_ready(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<usize>> {
-        if !crate::deterministic::probing_readiness() {
-            return Poll::Ready(self.streams.wait());
-        }
         match self.streams.poll() {
             Ok(Some(available)) => Poll::Ready(Ok(available)),
-            Ok(None) => {
+            Ok(None) if crate::deterministic::defer_stdin_readiness() => {
                 context.waker().wake_by_ref();
                 Poll::Pending
             }
+            Ok(None) => Poll::Ready(self.streams.wait()),
             Err(error) => Poll::Ready(Err(error)),
         }
     }
@@ -261,6 +276,12 @@ impl VirtualFile for StreamInput {
 struct StreamOutput {
     streams: Arc<HostStreams>,
     capture: CappedOutput,
+}
+
+impl Drop for StreamOutput {
+    fn drop(&mut self) {
+        self.streams.close(1);
+    }
 }
 
 impl std::fmt::Debug for StreamOutput {

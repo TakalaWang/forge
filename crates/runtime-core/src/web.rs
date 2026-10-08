@@ -75,7 +75,8 @@ impl WebGoCompilerSession {
 
 /// Runs one side of an interactive session in the calling Worker. `read`,
 /// `wait` and `write` block on the session's shared ring buffers; `poll`
-/// checks the input without blocking.
+/// checks the input without blocking; `close(fd)` closes the input (0) or
+/// output (1) end when the guest drops it.
 #[wasm_bindgen]
 pub fn run_interactive_side(
     request: JsValue,
@@ -83,6 +84,7 @@ pub fn run_interactive_side(
     poll: js_sys::Function,
     wait: js_sys::Function,
     write: js_sys::Function,
+    close: js_sys::Function,
     on_execution: js_sys::Function,
 ) -> Result<JsValue, JsValue> {
     console_error_panic_hook::set_once();
@@ -92,7 +94,7 @@ pub fn run_interactive_side(
         })?;
     let response = match run_side(
         request,
-        HostStreams::new(read, poll, wait, write),
+        HostStreams::new(read, poll, wait, write, close),
         |running| {
             on_execution
                 .call1(&JsValue::UNDEFINED, &JsValue::from_bool(running))

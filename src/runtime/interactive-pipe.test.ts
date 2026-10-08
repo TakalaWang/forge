@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createInteractivePipe, InteractivePipeReader, InteractivePipeWriter } from "./interactive-pipe";
+import {
+  createInteractivePipe,
+  interactivePipeCapacity,
+  InteractivePipeReader,
+  InteractivePipeWriter,
+} from "./interactive-pipe";
 
 const bytes = (text: string) => new TextEncoder().encode(text);
 const text = (data: Uint8Array) => new TextDecoder().decode(data);
@@ -66,6 +71,25 @@ describe("interactive pipe", () => {
     const writer = new InteractivePipeWriter(buffer);
     new InteractivePipeReader(buffer).close();
     expect(writer.write(bytes("ignored"))).toBe(-1);
+  });
+
+  it("fails a write the reader closes on partway, like the server's broken pipe", () => {
+    const buffer = createInteractivePipe(8);
+    const reader = new InteractivePipeReader(buffer);
+    class ClosedWhileBlocked extends InteractivePipeWriter {
+      protected override sleep(): void {
+        reader.read(4);
+        reader.close();
+      }
+    }
+    expect(new ClosedWhileBlocked(buffer).write(bytes("0123456789ab"))).toBe(-1);
+  });
+
+  it("sizes rings to hold the writer's whole output budget", () => {
+    expect(interactivePipeCapacity(1024)).toBe(64 * 1024);
+    expect(interactivePipeCapacity(4 * 1024 * 1024)).toBe(4 * 1024 * 1024);
+    expect(interactivePipeCapacity(4 * 1024 * 1024 + 1)).toBe(8 * 1024 * 1024);
+    expect(interactivePipeCapacity(2 ** 40)).toBe(2 ** 30);
   });
 
   it("keeps positions consistent when the 32-bit counters wrap", () => {

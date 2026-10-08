@@ -8,6 +8,16 @@ const READER_CLOSED = 3;
 const SEQUENCE = 4;
 const HEADER_BYTES = 32;
 
+/**
+ * The smallest ring that holds a writer's whole output budget. Only budgeted stdout bytes enter
+ * the pipe, so a write never blocks before the budget is spent, as on the server's unbounded pipe.
+ */
+export function interactivePipeCapacity(outputLimitBytes: number): number {
+  let capacity = INTERACTIVE_PIPE_CAPACITY_BYTES;
+  while (capacity < outputLimitBytes && capacity < 2 ** 30) capacity *= 2;
+  return capacity;
+}
+
 export function createInteractivePipe(capacity = INTERACTIVE_PIPE_CAPACITY_BYTES): SharedArrayBuffer {
   if (!Number.isSafeInteger(capacity) || capacity <= 0 || (capacity & (capacity - 1)) !== 0 || capacity > 2 ** 30) {
     throw new Error("Interactive pipe capacity must be a power of two up to 1 GiB.");
@@ -83,12 +93,12 @@ export class InteractivePipeReader extends InteractivePipeEnd {
 }
 
 export class InteractivePipeWriter extends InteractivePipeEnd {
-  /** Blocks until every byte is buffered. Returns the count written, or -1 if the reader closed first. */
+  /** Blocks until every byte is buffered. Returns the count written, or -1 if the reader closed before it finished. */
   write(bytes: Uint8Array): number {
     let offset = 0;
     while (offset < bytes.length) {
       const sequence = this.sequence();
-      if (Atomics.load(this.header, READER_CLOSED) !== 0) return offset > 0 ? offset : -1;
+      if (Atomics.load(this.header, READER_CLOSED) !== 0) return -1;
       const free = this.data.length - this.buffered();
       if (free === 0) {
         this.sleep(sequence);

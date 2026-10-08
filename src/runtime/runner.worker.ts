@@ -60,7 +60,7 @@ import {
   type ModuleWorkerBootstrap,
   moduleWorkerBaseUrl,
 } from "./module-worker";
-import { createInteractivePipe } from "./interactive-pipe";
+import { createInteractivePipe, interactivePipeCapacity } from "./interactive-pipe";
 import type { InteractiveSideMessage, InteractiveSideStart } from "./interactive-side.worker";
 import interactiveSideWorkerUrl from "./interactive-side.worker?worker&url";
 import wasmerThreadWorkerUrl from "./wasmer-thread.worker?worker&url";
@@ -460,8 +460,8 @@ async function runInteractiveSides(
   determinism: InteractiveRunConfig["determinism"],
 ): Promise<[CoreInteractiveSide, CoreInteractiveSide]> {
   if (!runtimeCoreModule) throw new Error("The WASM-OJ runtime core is not initialized.");
-  const contestantToInteractor = createInteractivePipe();
-  const interactorToContestant = createInteractivePipe();
+  const contestantToInteractor = createInteractivePipe(interactivePipeCapacity(programs.contestant.resources.outputLimitBytes));
+  const interactorToContestant = createInteractivePipe(interactivePipeCapacity(programs.interactor.resources.outputLimitBytes));
   const sides = [
     startInteractiveSide("contestant", {
       runtimeCore: runtimeCoreModule,
