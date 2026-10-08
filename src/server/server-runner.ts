@@ -303,9 +303,6 @@ export class ServerRunner implements Runner {
     if (this.activeOperation || this.cacheClearActive) {
       throw new Error("ServerRunner accepts one active operation at a time.");
     }
-    if (interactorArtifact.kind !== "wasm") {
-      throw new Error("Interactive judge artifacts must be standalone Wasm modules.");
-    }
     const operation = createServerRunOperation(this.generation);
     this.activeOperation = operation;
     this.inFlightRuns.add(operation);

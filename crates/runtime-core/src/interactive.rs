@@ -3,10 +3,7 @@ use crate::deterministic::{VirtualClock, attach_interactive_deterministic_import
 use crate::filesystem::{
     RuntimeProjectFilesystem, is_normalized_guest_path, runtime_project_files,
 };
-use crate::meter::{
-    CONTESTANT_METERING_MODULE, HOST_GAS_FUNCTION, INTERACTOR_METERING_MODULE,
-    instrument_wasm_with_host_meter,
-};
+use crate::meter::{CostPoints, MeterState, instrument_wasm, meter_state, remaining_points};
 use crate::module_imports::attach_declared_memory_imports;
 use crate::module_policy::{
     DEFERRED_START_EXPORT, defer_start_section, enforce_memory_limit,
@@ -17,6 +14,7 @@ use crate::{
     ExecutionTermination, InteractiveMetrics, InteractiveProcessResult, InteractiveProgram,
     InteractiveRequest, InteractiveResult, RunError,
 };
+use futures::channel::oneshot;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::pin::Pin;
@@ -24,74 +22,16 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use virtual_fs::{FsError, Pipe, PipeRx, PipeTx, VirtualFile};
-use wasmer::{
-    AsStoreMut, Engine, Function, FunctionEnv, FunctionEnvMut, Imports, Memory, RuntimeError,
-};
+use wasmer::{AsStoreMut, Engine, Imports, Memory};
 use wasmer_types::StoreId;
-use wasmer_wasix::bin_factory::spawn_exec_wasm;
+use wasmer_wasix::bin_factory::{run_exec, spawn_load_module};
+use wasmer_wasix::os::task::TaskJoinHandle;
 use wasmer_wasix::runtime::module_cache::{self, HashedModuleData, ModuleCache};
+use wasmer_wasix::runtime::task_manager::TaskWasm;
 use wasmer_wasix::{
     PluggableRuntime, Runtime, WasiEnv, WasiFunctionEnv, WasiRuntimeError, WasiVersion,
     generate_import_object_from_env,
 };
-
-#[derive(Debug)]
-struct GasBudget {
-    initial: u64,
-    state: Mutex<GasState>,
-}
-
-#[derive(Debug)]
-struct GasState {
-    remaining: u64,
-    exhausted: bool,
-}
-
-impl GasBudget {
-    fn new(initial: u64) -> Self {
-        Self {
-            initial,
-            state: Mutex::new(GasState {
-                remaining: initial,
-                exhausted: false,
-            }),
-        }
-    }
-
-    fn charge(&self, amount: u64) -> Result<(), RuntimeError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
-        if amount > state.remaining {
-            state.remaining = 0;
-            state.exhausted = true;
-            return Err(RuntimeError::new("WASM-OJ instruction budget exhausted"));
-        }
-        state.remaining -= amount;
-        Ok(())
-    }
-
-    fn metrics(&self) -> Result<(u64, bool), RunError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|error| RunError::Runtime(error.to_string()))?;
-        Ok((
-            self.initial.saturating_sub(state.remaining),
-            state.exhausted,
-        ))
-    }
-}
-
-#[derive(Clone)]
-struct GasEnv(Arc<GasBudget>);
-
-fn charge_gas(env: FunctionEnvMut<GasEnv>, amount: i64) -> Result<(), RuntimeError> {
-    let amount = u64::try_from(amount)
-        .map_err(|_| RuntimeError::new("WASM-OJ received a negative instruction charge"))?;
-    env.data().0.charge(amount)
-}
 
 #[derive(Debug)]
 struct InteractiveInput {
@@ -263,7 +203,8 @@ impl VirtualFile for InteractiveOutput {
 struct PreparedProgram {
     wasm: Vec<u8>,
     operations: BTreeMap<String, u64>,
-    gas: Arc<GasBudget>,
+    budget: u64,
+    meter: Arc<Mutex<Option<MeterState>>>,
     protocol: OutputCapture,
     stderr: OutputCapture,
     filesystem: RuntimeProjectFilesystem,
@@ -272,16 +213,8 @@ struct PreparedProgram {
 
 pub async fn interact(request: InteractiveRequest) -> Result<InteractiveResult, RunError> {
     validate_request(&request)?;
-    let contestant = prepare_program(
-        &request.contestant,
-        CONTESTANT_METERING_MODULE,
-        &request.determinism,
-    )?;
-    let interactor = prepare_program(
-        &request.interactor,
-        INTERACTOR_METERING_MODULE,
-        &request.determinism,
-    )?;
+    let contestant = prepare_program(&request.contestant, &request.determinism)?;
+    let interactor = prepare_program(&request.interactor, &request.determinism)?;
     let maximum_memory = request
         .contestant
         .resources
@@ -293,7 +226,7 @@ pub async fn interact(request: InteractiveRequest) -> Result<InteractiveResult, 
     let contestant_runtime = interactive_runtime(
         engine.clone(),
         &request.determinism,
-        contestant.gas.clone(),
+        contestant.meter.clone(),
         contestant.clock.clone(),
         request.contestant.startup_entropy_bytes,
         module_cache.clone(),
@@ -303,7 +236,7 @@ pub async fn interact(request: InteractiveRequest) -> Result<InteractiveResult, 
     let interactor_runtime = interactive_runtime(
         engine,
         &request.determinism,
-        interactor.gas.clone(),
+        interactor.meter.clone(),
         interactor.clock.clone(),
         request.interactor.startup_entropy_bytes,
         module_cache,
@@ -334,36 +267,38 @@ pub async fn interact(request: InteractiveRequest) -> Result<InteractiveResult, 
     *interactor_wasi
         .lock()
         .map_err(|error| RunError::Runtime(error.to_string()))? = Some(interactor_env.clone());
-    let mut contestant_handle = spawn_exec_wasm(
-        HashedModuleData::new(contestant.wasm.clone()),
+    let (mut contestant_handle, contestant_points) = spawn_metered(
         "contestant",
+        &contestant,
         contestant_env,
         &contestant_runtime,
     )
-    .await
-    .map_err(|error| RunError::Compile(format!("failed to start contestant: {error}")))?;
-    let mut interactor_handle = spawn_exec_wasm(
-        HashedModuleData::new(interactor.wasm.clone()),
+    .await?;
+    let (mut interactor_handle, interactor_points) = spawn_metered(
         "interactor",
+        &interactor,
         interactor_env,
         &interactor_runtime,
     )
-    .await
-    .map_err(|error| RunError::Compile(format!("failed to start interactor: {error}")))?;
-    let (contestant_status, interactor_status) = futures::join!(
+    .await?;
+    let (contestant_status, interactor_status, contestant_points, interactor_points) = futures::join!(
         contestant_handle.wait_finished(),
         interactor_handle.wait_finished(),
+        contestant_points,
+        interactor_points,
     );
 
     let contestant_to_interactor = contestant.protocol.bytes();
     let interactor_to_contestant = interactor.protocol.bytes();
     let contestant_result = process_result(
         contestant_status,
+        contestant_points,
         contestant,
         contestant_to_interactor.len(),
     )?;
     let interactor_result = process_result(
         interactor_status,
+        interactor_points,
         interactor,
         interactor_to_contestant.len(),
     )?;
@@ -376,15 +311,56 @@ pub async fn interact(request: InteractiveRequest) -> Result<InteractiveResult, 
     })
 }
 
+/// `spawn_exec_wasm` without its CLOEXEC sweep, which a fresh environment does not need, plus a
+/// recycle hook that reads the meter from the store after the process exits. WASIX reports the
+/// exit before it recycles the store, so callers await both.
+async fn spawn_metered(
+    name: &str,
+    program: &PreparedProgram,
+    env: WasiEnv,
+    runtime: &Arc<dyn Runtime + Send + Sync>,
+) -> Result<
+    (
+        TaskJoinHandle,
+        oneshot::Receiver<Result<CostPoints, String>>,
+    ),
+    RunError,
+> {
+    let module = spawn_load_module(name, HashedModuleData::new(program.wasm.clone()), runtime)
+        .await
+        .map_err(|error| RunError::Compile(format!("failed to start {name}: {error}")))?;
+    let finished = env.thread.join_handle();
+    let meter = program.meter.clone();
+    let (points, received) = oneshot::channel();
+    let task = TaskWasm::new(Box::new(run_exec), env, module, true, true).with_recycle(Box::new(
+        move |mut exited| {
+            let read = meter
+                .lock()
+                .map_err(|error| error.to_string())
+                .and_then(|meter| {
+                    meter
+                        .clone()
+                        .ok_or_else(|| "meter is unavailable".to_string())
+                })
+                .and_then(|meter| remaining_points(&mut exited.store, &meter));
+            let _ = points.send(read);
+        },
+    ));
+    runtime
+        .task_manager()
+        .task_wasm(task)
+        .map_err(|error| RunError::Compile(format!("failed to start {name}: {error}")))?;
+    Ok((finished, received))
+}
+
 fn prepare_program(
     program: &InteractiveProgram,
-    metering_module: &'static str,
     determinism: &crate::DeterminismConfig,
 ) -> Result<PreparedProgram, RunError> {
     let limited = enforce_memory_limit(&program.wasm, program.resources.memory_limit_bytes)
         .map_err(RunError::Compile)?;
-    let metered =
-        instrument_wasm_with_host_meter(&limited, metering_module).map_err(RunError::Compile)?;
+    let metered = instrument_wasm(&limited, program.resources.instruction_budget)
+        .map_err(RunError::Compile)?;
     let executable = defer_start_section(&metered.wasm).map_err(RunError::Compile)?;
     let wasm =
         rewrite_interactive_deterministic_imports(&executable.wasm).map_err(RunError::Compile)?;
@@ -397,7 +373,8 @@ fn prepare_program(
     Ok(PreparedProgram {
         wasm,
         operations: metered.operations,
-        gas: Arc::new(GasBudget::new(program.resources.instruction_budget)),
+        budget: program.resources.instruction_budget,
+        meter: Arc::new(Mutex::new(None)),
         protocol,
         stderr,
         filesystem,
@@ -443,12 +420,20 @@ fn build_environment(
 
 fn process_result(
     status: Result<wasmer_wasix::wasmer_wasix_types::wasi::ExitCode, Arc<WasiRuntimeError>>,
+    points: Result<Result<CostPoints, String>, oneshot::Canceled>,
     prepared: PreparedProgram,
     protocol_bytes: usize,
 ) -> Result<InteractiveProcessResult, RunError> {
     let stderr = prepared.stderr.bytes();
     let output_exceeded = prepared.protocol.exceeded() || prepared.stderr.exceeded();
-    let (cost, exhausted) = prepared.gas.metrics()?;
+    let points = points
+        .map_err(|_| RunError::Runtime("interactive process exited without its meter".to_string()))?
+        .map_err(RunError::Runtime)?;
+    let exhausted = points == CostPoints::Exhausted;
+    let cost = match points {
+        CostPoints::Remaining(points) => prepared.budget.saturating_sub(points),
+        CostPoints::Exhausted => prepared.budget,
+    };
     let logical_time_exceeded = prepared.clock.limit_exceeded()?;
     let (code, termination) = if prepared.filesystem.quota_exceeded() {
         (137, ExecutionTermination::FilesystemLimit)
@@ -516,7 +501,7 @@ fn validate_request(request: &InteractiveRequest) -> Result<(), RunError> {
 fn interactive_runtime(
     engine: Engine,
     determinism: &crate::DeterminismConfig,
-    gas: Arc<GasBudget>,
+    meter: Arc<Mutex<Option<MeterState>>>,
     clock: VirtualClock,
     startup_entropy_bytes: u64,
     module_cache: Arc<dyn ModuleCache + Send + Sync>,
@@ -578,22 +563,6 @@ fn interactive_runtime(
             clock.clone(),
             startup_entropy_bytes,
         );
-        let metering_module = module
-            .imports()
-            .find_map(|import| match import.module() {
-                CONTESTANT_METERING_MODULE => Some(CONTESTANT_METERING_MODULE),
-                INTERACTOR_METERING_MODULE => Some(INTERACTOR_METERING_MODULE),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                io::Error::other("interactive module has no WASM-OJ metering identity")
-            })?;
-        let gas_env = FunctionEnv::new(&mut *store, GasEnv(gas.clone()));
-        imports.define(
-            metering_module,
-            HOST_GAS_FUNCTION,
-            Function::new_typed_with_env(&mut *store, &gas_env, charge_gas),
-        );
         attach_capability_denials(store, module, &mut imports).map_err(io::Error::other)?;
         attach_declared_memory_imports(store, module, &mut imports).map_err(io::Error::other)?;
         Ok(imports)
@@ -616,6 +585,10 @@ fn interactive_runtime(
             .memory
             .lock()
             .map_err(|error| io::Error::other(error.to_string()))? = Some(memory);
+        *meter
+            .lock()
+            .map_err(|error| io::Error::other(error.to_string()))? =
+            Some(meter_state(instance).map_err(io::Error::other)?);
         pending
             .wasi
             .initialize(&mut *store, instance.clone())
@@ -673,7 +646,7 @@ mod tests {
     use super::interact;
     use crate::{
         DeterminismConfig, ExecutionTermination, InteractiveProgram, InteractiveRequest,
-        ResourcePolicy,
+        ResourcePolicy, RunRequest,
     };
     use std::collections::BTreeMap;
 
@@ -996,6 +969,95 @@ mod tests {
         assert_eq!(result.contestant.termination, ExecutionTermination::Exited);
         assert_eq!(result.contestant.metrics.logical_time_ns, 0);
         assert_eq!(result.interactor.metrics.logical_time_ns, 0);
+    }
+
+    #[test]
+    fn interactive_contestant_is_metered_like_a_standalone_run() {
+        let looping = |ending: &str| {
+            wat::parse_str(format!(
+                r#"(module
+                  (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
+                  (memory (export "memory") 1)
+                  (func (export "_start")
+                    (local $remaining i32)
+                    i32.const 1000 local.set $remaining
+                    (loop $again
+                      local.get $remaining i32.const 1 i32.sub local.tee $remaining
+                      br_if $again)
+                    {ending}))"#
+            ))
+            .unwrap()
+        };
+        let determinism = DeterminismConfig {
+            random_seed: 7,
+            realtime_epoch_ms: 946_684_800_000,
+            clock_step_ns: 1_000_000,
+        };
+        let execute = |wasm: &[u8], instruction_budget: u64| {
+            let mut contestant = program(wasm.to_vec());
+            contestant.resources.instruction_budget = instruction_budget;
+            let standalone = crate::run(RunRequest {
+                wasm: contestant.wasm.clone(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                stdin: Vec::new(),
+                files: BTreeMap::new(),
+                output_paths: Vec::new(),
+                cwd: contestant.cwd.clone(),
+                startup_entropy_bytes: 0,
+                determinism: determinism.clone(),
+                resources: contestant.resources.clone(),
+            })
+            .unwrap();
+            let interactive = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(interact(InteractiveRequest {
+                    interactor: contestant.clone(),
+                    contestant,
+                    determinism: determinism.clone(),
+                }))
+                .unwrap();
+            assert_eq!(interactive.interactor.code, interactive.contestant.code);
+            assert_eq!(
+                interactive.interactor.termination,
+                interactive.contestant.termination
+            );
+            assert_eq!(
+                interactive.interactor.metrics.cost,
+                interactive.contestant.metrics.cost
+            );
+            (standalone, interactive.contestant)
+        };
+
+        for (ending, code) in [("", 0), ("i32.const 3 call $exit", 3)] {
+            let wasm = looping(ending);
+            let (standalone, interactive) = execute(&wasm, 1_000_000);
+            assert_eq!(standalone.termination, ExecutionTermination::Exited);
+            assert_eq!(standalone.code, code);
+            assert_eq!(interactive.termination, ExecutionTermination::Exited);
+            assert_eq!(interactive.code, code);
+            assert_eq!(interactive.metrics.cost, standalone.metrics.cost);
+
+            let budget = standalone.metrics.cost - 1;
+            let (standalone, interactive) = execute(&wasm, budget);
+            assert_eq!(
+                standalone.termination,
+                ExecutionTermination::InstructionLimit
+            );
+            assert_eq!(
+                interactive.termination,
+                ExecutionTermination::InstructionLimit
+            );
+            assert_eq!(interactive.code, 137);
+            assert_eq!(interactive.metrics.cost, budget);
+            assert_eq!(interactive.metrics.cost, standalone.metrics.cost);
+        }
+
+        let (standalone, interactive) = execute(&looping("unreachable"), 1_000_000);
+        assert_eq!(standalone.termination, ExecutionTermination::Trap);
+        assert_eq!(interactive.metrics.cost, standalone.metrics.cost);
     }
 
     fn program(wasm: Vec<u8>) -> InteractiveProgram {

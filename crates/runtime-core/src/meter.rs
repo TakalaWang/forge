@@ -7,18 +7,13 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use wasm_encoder::reencode::{Error as ReencodeError, Reencode};
 use wasm_encoder::{Encode, Section};
-#[cfg(not(target_arch = "wasm32"))]
-use wasmer::Global;
 #[cfg(target_arch = "wasm32")]
 use wasmer::js::AsJs;
-use wasmer::{AsStoreMut, Instance};
+use wasmer::{AsStoreMut, Global, Instance};
 
 pub const METER_MODEL: &str = "weighted";
 const METERING_MODULE: &str = "wasm_oj_metering";
 const GAS_COUNTER_NAME: &str = "gas_counter";
-pub(crate) const CONTESTANT_METERING_MODULE: &str = "wasm_oj_contestant_metering";
-pub(crate) const INTERACTOR_METERING_MODULE: &str = "wasm_oj_interactor_metering";
-pub(crate) const HOST_GAS_FUNCTION: &str = "charge";
 
 #[derive(Debug)]
 pub struct InstrumentedModule {
@@ -53,10 +48,7 @@ pub enum CostPoints {
 
 #[derive(Clone, Debug)]
 pub struct MeterState {
-    #[cfg(not(target_arch = "wasm32"))]
     gas_counter: Global,
-    #[cfg(target_arch = "wasm32")]
-    gas_counter: WebAssembly::Global,
 }
 
 pub fn instrument_wasm(wasm: &[u8], budget: u64) -> Result<InstrumentedModule, String> {
@@ -71,32 +63,6 @@ pub fn instrument_wasm(wasm: &[u8], budget: u64) -> Result<InstrumentedModule, S
     let metered = gas_metering::inject(&mut module, backend, &WeightedRules)
         .map_err(|error| format!("failed to inject weighted metering: {error}"))?;
     let mut metered = set_initial_meter_budget(&metered, initial_budget)?;
-    for (name, data) in runtime_sections {
-        let section = wasm_encoder::CustomSection {
-            name: Cow::Owned(name),
-            data: Cow::Owned(data),
-        };
-        metered.push(section.id());
-        section.encode(&mut metered);
-    }
-    Ok(InstrumentedModule {
-        wasm: metered,
-        operations,
-    })
-}
-
-pub(crate) fn instrument_wasm_with_host_meter(
-    wasm: &[u8],
-    metering_module: &'static str,
-) -> Result<InstrumentedModule, String> {
-    let runtime_sections = runtime_custom_sections(wasm)?;
-    let executable = canonicalize_custom_sections(wasm)?;
-    let operations = inspect_weighted_opcodes(&executable)?;
-    let mut module = ModuleInfo::new(&executable)
-        .map_err(|error| format!("failed to parse module for weighted metering: {error}"))?;
-    let backend = gas_metering::host_function::Injector::new(metering_module, HOST_GAS_FUNCTION);
-    let mut metered = gas_metering::inject(&mut module, backend, &WeightedRules)
-        .map_err(|error| format!("failed to inject weighted host metering: {error}"))?;
     for (name, data) in runtime_sections {
         let section = wasm_encoder::CustomSection {
             name: Cow::Owned(name),
@@ -271,26 +237,13 @@ fn inspect_weighted_opcodes(wasm: &[u8]) -> Result<BTreeMap<String, u64>, String
     Ok(operations)
 }
 
-pub fn meter_state(store: &mut impl AsStoreMut, instance: &Instance) -> Result<MeterState, String> {
-    let gas_counter = instance
+pub fn meter_state(instance: &Instance) -> Result<MeterState, String> {
+    instance
         .exports
         .get_global(GAS_COUNTER_NAME)
-        .map_err(|error| format!("instrumented module does not export its meter: {error}"))?
-        .clone();
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = store;
-        Ok(MeterState { gas_counter })
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        let js_global: WebAssembly::Global = gas_counter.as_jsvalue(store).into();
-        Ok(MeterState {
-            gas_counter: js_global,
-        })
-    }
+        .cloned()
+        .map(|gas_counter| MeterState { gas_counter })
+        .map_err(|error| format!("instrumented module does not export its meter: {error}"))
 }
 
 pub fn remaining_points(
@@ -306,8 +259,8 @@ pub fn remaining_points(
 
     #[cfg(target_arch = "wasm32")]
     let value = {
-        let _ = store;
-        i64::try_from(BigInt::from(meter.gas_counter.value()))
+        let gas_counter: WebAssembly::Global = meter.gas_counter.as_jsvalue(store).into();
+        i64::try_from(BigInt::from(gas_counter.value()))
             .map_err(|_| "metering global is outside the signed 64-bit range".to_string())?
     };
 
