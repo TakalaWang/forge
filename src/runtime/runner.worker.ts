@@ -462,21 +462,20 @@ async function runInteractiveSides(
   if (!runtimeCoreModule) throw new Error("The WASM-OJ runtime core is not initialized.");
   const contestantToInteractor = createInteractivePipe(interactivePipeCapacity(programs.contestant.resources.outputLimitBytes));
   const interactorToContestant = createInteractivePipe(interactivePipeCapacity(programs.interactor.resources.outputLimitBytes));
-  const sides = [
-    startInteractiveSide("contestant", {
+  const sides: ReturnType<typeof startInteractiveSide>[] = [];
+  try {
+    sides.push(startInteractiveSide("contestant", {
       runtimeCore: runtimeCoreModule,
       request: { program: programs.contestant, determinism },
       input: interactorToContestant,
       output: contestantToInteractor,
-    }),
-    startInteractiveSide("interactor", {
+    }));
+    sides.push(startInteractiveSide("interactor", {
       runtimeCore: runtimeCoreModule,
       request: { program: programs.interactor, determinism },
       input: contestantToInteractor,
       output: interactorToContestant,
-    }),
-  ] as const;
-  try {
+    }));
     void Promise.all(sides.map((side) => side.running)).then(() => {
       progress(requestId, "running", "Running interactive session with deterministic Wasmer", 0.25);
     });
@@ -508,8 +507,8 @@ function startInteractiveSide(role: InteractiveRole, start: InteractiveSideStart
         if (response.ok && response.result) {
           resolve(response.result);
         } else {
-          const error = response.error ?? { code: "RUNTIME_ERROR", message: `The interactive ${role} returned no result.` };
-          reject(Object.assign(new Error(error.message), { code: error.code }));
+          const error = response.error ?? { code: "RUNTIME_ERROR", message: "the runtime returned no result." };
+          reject(Object.assign(new Error(`Interactive ${role} failed: ${error.message}`), { code: error.code }));
         }
       }
     });
@@ -518,7 +517,12 @@ function startInteractiveSide(role: InteractiveRole, start: InteractiveSideStart
       reject(Object.assign(new Error(event.message || `The interactive ${role} Worker crashed.`), { code: "RUNTIME_ERROR" }));
     });
   });
-  worker.postMessage(start);
+  try {
+    worker.postMessage(start);
+  } catch (error) {
+    worker.terminate();
+    throw error;
+  }
   return { worker, running, result };
 }
 
