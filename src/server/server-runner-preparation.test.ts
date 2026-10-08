@@ -9,7 +9,7 @@ import { costProfileId } from "../core/cost-profile";
 import { DEFAULT_DETERMINISM } from "../core/determinism";
 import { DEFAULT_RESOURCE_POLICY } from "../core/resources";
 import { PYTHON_PACKAGE } from "../core/toolchains";
-import type { BuildArtifact, RunConfig } from "../core/types";
+import type { BuildArtifact, InteractiveRunConfig, RunConfig } from "../core/types";
 import { RuntimeDriverRegistry } from "@wasm-oj/core";
 
 const spawnState = vi.hoisted(() => ({ spawn: vi.fn() }));
@@ -118,6 +118,30 @@ describe("ServerRunner isolated preparation lifecycle", () => {
       }
     },
   );
+
+  it.each(["preparation", "run", "interaction"] as const)(
+    "absorbs a late stdin EPIPE after a cancelled %s child is killed",
+    async (stage) => {
+      const child = stalledChild();
+      spawnState.spawn.mockReturnValue(child);
+      const runner = stage === "preparation" ? await createRunner() : await createNativeRunner();
+      try {
+        const running = stage === "interaction"
+          ? runner.interact(wasmArtifact(), wasmArtifact(), interactiveConfig())
+          : runner.run(wasmArtifact(), runConfig());
+        const rejection = expect(running).rejects.toThrow(/cancel|superseded/i);
+        await vi.waitFor(() => expect(spawnState.spawn).toHaveBeenCalledOnce());
+
+        runner.cancel();
+        await rejection;
+
+        const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+        expect(() => child.stdin.emit("error", epipe)).not.toThrow();
+      } finally {
+        runner.dispose();
+      }
+    },
+  );
 });
 
 async function createRunner(): Promise<ServerRunner> {
@@ -198,5 +222,13 @@ function runConfig(): RunConfig {
     env: {},
     determinism: { ...DEFAULT_DETERMINISM },
     resources: { ...DEFAULT_RESOURCE_POLICY },
+  };
+}
+
+function interactiveConfig(): InteractiveRunConfig {
+  return {
+    contestant: { args: [], env: {}, resources: { ...DEFAULT_RESOURCE_POLICY } },
+    interactor: { args: [], env: {}, resources: { ...DEFAULT_RESOURCE_POLICY } },
+    determinism: { ...DEFAULT_DETERMINISM },
   };
 }

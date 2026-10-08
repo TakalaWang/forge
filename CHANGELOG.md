@@ -6,6 +6,9 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 
 ## Unreleased
 
+- Fixed a host process crash (`Uncaught Error: write EPIPE`) when `ServerRunner` cancelled or
+  timed out a runtime preparation stage, run or interactive session while its request was
+  still being written to the child's stdin. Late stdin errors after cleanup are now ignored.
 - Interactive contestants and interactors now use the same in-module instruction meter as
   standalone runs, and the runtime reads each program's counter when it exits. They are charged
   exactly what a standalone run charges for the same code; the previous host meter left out the
