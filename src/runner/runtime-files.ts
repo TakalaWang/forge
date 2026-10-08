@@ -1,5 +1,6 @@
 import { WASM_OJ_STORAGE } from "../core/contract.ts";
 import { sha256Hex } from "../core/hash.ts";
+import { readProcessMessage, type StreamingProcess } from "../core/process-output.ts";
 
 const MAGIC = new TextEncoder().encode("WOJFS002");
 const HEADER_BYTES = 12;
@@ -96,75 +97,32 @@ export function decodeRuntimeFiles(archive: Uint8Array): Record<string, Uint8Arr
   return files;
 }
 
-export interface RuntimeFilesExportProcess {
-  readonly stdin?: WritableStream | undefined;
-  readonly stdout: ReadableStream<Uint8Array>;
-  readonly stderr: ReadableStream<Uint8Array>;
-}
-
 /**
- * Read an export until stdout holds a complete archive. `@wasmer/sdk` `Instance.wait()` also
- * waits for stdout/stderr EOF, which its thread-pool teardown can drop after all output arrived.
+ * Read an export until stdout holds a complete archive and return exactly its framed bytes.
+ * `@wasmer/sdk` `Instance.wait()` can hang after all output arrived; see readProcessMessage.
  */
-export async function readRuntimeFilesExport(exporter: RuntimeFilesExportProcess): Promise<Uint8Array> {
-  await exporter.stdin?.close().catch(() => undefined);
-  const stdout = exporter.stdout.getReader();
-  const stderr = exporter.stderr.getReader();
-  const diagnostics = readToEnd(stderr).catch(() => new Uint8Array());
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-  let required = MAGIC.byteLength + HEADER_BYTES;
-  try {
-    while (true) {
-      const { done, value } = await stdout.read();
-      if (done) {
-        const detail = new TextDecoder().decode(await diagnostics);
-        throw new Error(`The runtime file export ended before its archive was complete: ${detail}`);
-      }
-      chunks.push(value);
-      received += value.byteLength;
-      if (received < required) continue;
-      const archive = concatenate(chunks);
-      chunks.splice(0, chunks.length, archive);
-      const missing = missingArchiveBytes(archive);
-      if (missing === 0) return archive;
-      required = received + missing;
-    }
-  } finally {
-    await Promise.allSettled([stdout.cancel(), stderr.cancel()]);
+export async function readRuntimeFilesExport(
+  exporter: StreamingProcess,
+  idleGraceMs?: number,
+): Promise<Uint8Array> {
+  const { message, stderr } = await readProcessMessage(exporter, completeArchive, { idleGraceMs });
+  if (message === undefined) {
+    throw new Error(`The runtime file export ended before its archive was complete: ${stderr}`);
   }
+  return message;
 }
 
-function missingArchiveBytes(archive: Uint8Array): number {
-  const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength);
+function completeArchive(bytes: Uint8Array): Uint8Array | undefined {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let offset = MAGIC.byteLength;
-  while (offset + HEADER_BYTES <= archive.byteLength) {
+  while (offset + HEADER_BYTES <= bytes.byteLength) {
     const pathLength = view.getUint32(offset, true);
     const dataLength = Number(view.getBigUint64(offset + 4, true));
     offset += HEADER_BYTES;
-    if (pathLength === 0 && dataLength === 0) return 0;
+    if (pathLength === 0 && dataLength === 0) return bytes.slice(0, offset);
     offset += pathLength + dataLength;
   }
-  return offset + HEADER_BYTES - archive.byteLength;
-}
-
-async function readToEnd(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<Uint8Array> {
-  const chunks: Uint8Array[] = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) return concatenate(chunks);
-    chunks.push(value);
-  }
-}
-
-function concatenate(chunks: readonly Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return output;
+  return undefined;
 }
 
 export async function verifyAndDecodeRuntimeFiles(

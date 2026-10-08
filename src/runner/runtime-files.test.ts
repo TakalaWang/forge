@@ -115,4 +115,43 @@ describe("runtime file exports", () => {
       stderr: outputStream([encoder.encode("Traceback: boom")], true).stream,
     })).rejects.toThrow("Traceback: boom");
   });
+
+  it("reports stderr after the idle grace when only stderr reaches EOF", async () => {
+    const complete = archive([["/cpython/lib/python314.zip", "stdlib"]]);
+    const stdout = outputStream([complete.subarray(0, 20)], false);
+    await expect(readRuntimeFilesExport({
+      stdout: stdout.stream,
+      stderr: outputStream([encoder.encode("MemoryError")], true).stream,
+    }, 30)).rejects.toThrow("ended before its archive was complete: MemoryError");
+    expect(stdout.state.cancelled).toBe(true);
+  });
+
+  it("keeps reading while stdout still delivers after stderr reached EOF", async () => {
+    const expected = archive([["/cpython/lib/python314.zip", "stdlib".repeat(100)]]);
+    const chunks = split(expected, 32);
+    const stdout = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        const chunk = chunks.shift();
+        if (chunk) controller.enqueue(chunk);
+      },
+    });
+    // The 100 ms grace is shorter than the whole delivery but longer than each gap between chunks.
+    await expect(readRuntimeFilesExport({
+      stdout,
+      stderr: outputStream([], true).stream,
+    }, 100)).resolves.toEqual(expected);
+  });
+
+  it("returns exactly the framed archive whatever trails it in the same chunk", async () => {
+    const expected = archive([["/cpython/lib/python314.zip", "stdlib"]]);
+    const trailing = new Uint8Array([...expected, ...encoder.encode("TRAILING")]);
+    for (const chunks of [[trailing], split(trailing, 5)]) {
+      const bytes = await readRuntimeFilesExport({
+        stdout: outputStream(chunks, false).stream,
+        stderr: outputStream([], false).stream,
+      });
+      expect(bytes).toEqual(expected);
+    }
+  });
 });
