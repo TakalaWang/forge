@@ -91,6 +91,31 @@ fixtures.push(
   { language:"c", label:"cpu-work", source:'#include <stdio.h>\nint main(){volatile unsigned long long s=0;for(unsigned i=0;i<10000000;i++)s+=i;printf("%llu\\n",s);}', input:"", expected:"49999995000000\n" },
   { language:"python", label:"memory-16mb", source:'print(42)', input:"", expected:"42\n", resources:{memoryLimitBytes:16*1024*1024} },
 );
+const guessInteractor = { language:"cpp", source:'#include <cstdio>\nint main(int argc,char**argv){std::FILE*f=argc>1?std::fopen(argv[1],"r"):nullptr;long long secret,guess;int limit;if(!f||std::fscanf(f,"%lld %d",&secret,&limit)!=2)return 3;for(int round=0;round<limit;round++){if(std::scanf("%lld",&guess)!=1)return std::feof(stdin)?4:5;if(guess==secret){std::puts("=");std::fflush(stdout);return 0;}std::puts(guess<secret?"<":">");std::fflush(stdout);}return 1;}' };
+const guessInput = secret => ({ args:["/judge/input.txt"], files:{"/judge/input.txt":`${secret} 25\n`} });
+const guessCpp = { language:"cpp", source:'#include <iostream>\n#include <string>\nint main(){long long lo=1,hi=1<<20;std::string r;while(lo<=hi){long long mid=(lo+hi)/2;std::cout<<mid<<std::endl;if(!(std::cin>>r))return 2;if(r=="=")return 0;if(r=="<")lo=mid+1;else hi=mid-1;}return 1;}' };
+const guessC = { language:"c", source:'#include <stdio.h>\nint main(void){long long lo=1,hi=1<<20;char r[4];while(lo<=hi){long long mid=(lo+hi)/2;printf("%lld\\n",mid);fflush(stdout);if(scanf("%3s",r)!=1)return 2;if(r[0]==\'=\')return 0;if(r[0]==\'<\')lo=mid+1;else hi=mid-1;}return 1;}' };
+const readOne = { language:"c", source:'#include <stdio.h>\nint main(void){int x;return scanf("%d",&x)==1?0:1;}' };
+const exited = (process, code) => process.termination === "exited" && process.code === code;
+const guessed = result => exited(result.contestant, 0) && exited(result.interactor, 0) && result.interactorToContestant.endsWith("=\n");
+const interactiveFixtures = [
+  { label:"interactive-ac-cpp", contestant:guessCpp, interactor:guessInteractor, options:{ interactor:guessInput(1) }, check:result => guessed(result) && result.contestantToInteractor.split("\n").length - 1 === 20 },
+  { label:"interactive-ac-c", contestant:guessC, interactor:guessInteractor, options:{ interactor:guessInput(777777) }, check:guessed },
+  { label:"interactive-wa-c", contestant:{ language:"c", source:'#include <stdio.h>\nint main(void){char r[4];for(;;){puts("7");fflush(stdout);if(scanf("%3s",r)!=1)return 0;}}' }, interactor:guessInteractor, options:{ interactor:guessInput(1) }, check:result => exited(result.interactor, 1) && exited(result.contestant, 0) && result.contestantToInteractor === "7\n".repeat(26) },
+  { label:"interactive-python-contestant", contestant:{ language:"python", source:'lo, hi = 1, 1 << 20\nwhile lo <= hi:\n    mid = (lo + hi) // 2\n    print(mid, flush=True)\n    reply = input().strip()\n    if reply == "=":\n        break\n    if reply == "<":\n        lo = mid + 1\n    else:\n        hi = mid - 1\n' }, interactor:guessInteractor, options:{ interactor:guessInput(31337) }, check:guessed },
+  { label:"interactive-python-interactor", contestant:guessC, interactor:{ language:"python", source:'import sys\nsecret, limit = map(int, open(sys.argv[1]).read().split())\nfor _ in range(limit):\n    try:\n        guess = int(input())\n    except EOFError:\n        sys.exit(4)\n    if guess == secret:\n        print("=", flush=True)\n        sys.exit(0)\n    print("<" if guess < secret else ">", flush=True)\nsys.exit(1)\n' }, options:{ interactor:guessInput(424242) }, check:guessed },
+  { label:"interactive-poll-timeout", contestant:{ language:"c", source:'#include <poll.h>\n#include <stdio.h>\nint main(void){struct pollfd p={0,POLLIN,0};int r=poll(&p,1,1000);printf("%d\\n",r);fflush(stdout);char b[8];if(scanf("%7s",b)!=1)return 2;return b[0]==\'o\'?0:3;}' }, interactor:{ language:"c", source:'#include <stdio.h>\nint main(void){char b[8];if(scanf("%7s",b)!=1)return 2;puts("ok");fflush(stdout);return b[0]==\'0\'?0:1;}' }, options:{ contestant:{ resources:{ wallTimeLimitMs:10000 } }, interactor:{ resources:{ wallTimeLimitMs:10000 } } }, check:(result, elapsedMs) => exited(result.contestant, 0) && exited(result.interactor, 0) && result.contestantToInteractor === "0\n" && result.interactorToContestant === "ok\n" && result.contestant.metrics.logicalTimeNs >= 1e9 && elapsedMs < 5000 },
+  { label:"interactive-poll-ready", contestant:{ language:"c", source:'#include <poll.h>\n#include <stdio.h>\nint main(void){puts("ping");fflush(stdout);struct pollfd p={0,POLLIN,0};while(poll(&p,1,0)==0){}if(!(p.revents&POLLIN))return 4;char b[8];if(scanf("%7s",b)!=1)return 2;return b[0]==\'p\'&&b[1]==\'o\'?0:3;}' }, interactor:{ language:"c", source:'#include <stdio.h>\nint main(void){char b[8];if(scanf("%7s",b)!=1)return 2;puts("pong");fflush(stdout);return 0;}' }, options:{ contestant:{ resources:{ wallTimeLimitMs:10000 } }, interactor:{ resources:{ wallTimeLimitMs:10000 } } }, check:result => exited(result.contestant, 0) && exited(result.interactor, 0) && result.contestantToInteractor === "ping\n" && result.interactorToContestant === "pong\n" },
+  { label:"interactive-close-stdout", contestant:{ language:"c", source:'#include <stdio.h>\nint main(void){puts("42");if(fclose(stdout)!=0)return 4;char b[8];if(scanf("%7s",b)!=1)return 2;return b[0]==\'o\'&&b[1]==\'k\'?0:3;}' }, interactor:{ language:"c", source:'#include <stdio.h>\nint main(void){int x,n=0,s=0;while(scanf("%d",&x)==1){n++;s+=x;}int ok=n==1&&s==42;puts(ok?"ok":"no");fflush(stdout);return ok?0:1;}' }, options:{ contestant:{ resources:{ wallTimeLimitMs:10000 } }, interactor:{ resources:{ wallTimeLimitMs:10000 } } }, check:result => exited(result.contestant, 0) && exited(result.interactor, 0) && result.contestantToInteractor === "42\n" && result.interactorToContestant === "ok\n" },
+  { label:"interactive-batch", contestant:{ language:"c", source:'#include <stdio.h>\nint main(void){long long x;for(int i=0;i<30000;i++){if(scanf("%lld",&x)!=1)return 2;printf("%lld\\n",2*x);}fflush(stdout);char b[8];if(scanf("%7s",b)!=1)return 3;return b[0]==\'o\'?0:4;}' }, interactor:{ language:"c", source:'#include <stdio.h>\nint main(void){for(int i=0;i<30000;i++)printf("%d\\n",1000000+i);fflush(stdout);for(int i=0;i<30000;i++){long long x;if(scanf("%lld",&x)!=1)return 2;if(x!=2LL*(1000000+i))return 1;}puts("ok");fflush(stdout);return 0;}' }, options:{ contestant:{ resources:{ wallTimeLimitMs:20000 } }, interactor:{ resources:{ wallTimeLimitMs:20000 } } }, check:result => exited(result.contestant, 0) && exited(result.interactor, 0) && result.contestantToInteractor.length === 240000 && result.interactorToContestant.length === 240003 && result.interactorToContestant.endsWith("ok\n") },
+  { label:"interactive-poll-clockless", contestant:{ language:"c", source:'#include <poll.h>\n#include <stdio.h>\nint main(void){struct pollfd p[2]={{0,POLLIN,0},{1,POLLOUT,0}};if(poll(p,2,-1)<1||!(p[1].revents&POLLOUT))return 4;puts("ping");fflush(stdout);if(poll(p,1,-1)!=1||!(p[0].revents&POLLIN))return 5;char b[8];if(scanf("%7s",b)!=1)return 2;return b[0]==\'p\'&&b[1]==\'o\'?0:3;}' }, interactor:{ language:"c", source:'#include <stdio.h>\nint main(void){char b[8];if(scanf("%7s",b)!=1)return 2;puts("pong");fflush(stdout);return 0;}' }, options:{ contestant:{ resources:{ wallTimeLimitMs:10000 } }, interactor:{ resources:{ wallTimeLimitMs:10000 } } }, check:result => exited(result.contestant, 0) && exited(result.interactor, 0) && result.contestantToInteractor === "ping\n" && result.interactorToContestant === "pong\n" },
+  { label:"interactive-instruction-limit", contestant:{ language:"cpp", source:'int main(){volatile unsigned long long spin=0;for(;;)spin=spin+1;}' }, interactor:guessInteractor, options:{ contestant:{ resources:{ wallTimeLimitMs:30000 } }, interactor:{ ...guessInput(1), resources:{ wallTimeLimitMs:30000 } } }, check:result => result.contestant.termination === "instruction-limit" && result.contestant.code === 137 && exited(result.interactor, 4) },
+  { label:"interactive-contestant-exits", contestant:{ language:"c", source:'int main(void){return 0;}' }, interactor:guessInteractor, options:{ interactor:guessInput(1) }, check:result => exited(result.contestant, 0) && exited(result.interactor, 4) && result.contestantToInteractor === "" },
+  { label:"interactive-interactor-exits", contestant:{ language:"c", source:'#include <errno.h>\n#include <stdio.h>\n#include <unistd.h>\nint main(void){char b[8];if(scanf("%7s",b)!=1)return 2;for(int i=0;i<1000000;i++)if(write(1,"x\\n",2)<0)return errno==EPIPE?32:33;return 34;}' }, interactor:{ language:"cpp", source:'#include <cstdio>\nint main(){std::puts("bye");std::fflush(stdout);return 0;}' }, options:{}, check:result => exited(result.contestant, 32) && exited(result.interactor, 0) && result.interactorToContestant === "bye\n" },
+  { label:"interactive-output-flood", contestant:{ language:"c", source:'#include <stdio.h>\nint main(void){while(fputs("flood\\n",stdout)>=0&&fflush(stdout)==0){}return 0;}' }, interactor:{ language:"c", source:'#include <stdio.h>\nint main(void){while(getchar()!=EOF){}return 0;}' }, options:{ contestant:{ resources:{ outputLimitBytes:65536 } } }, check:result => result.contestant.termination === "output-limit" && result.contestant.code === 137 && result.contestantToInteractor.length === 65536 && exited(result.interactor, 0) },
+  { label:"interactive-wall-time", contestant:readOne, interactor:readOne, options:{ contestant:{ resources:{ wallTimeLimitMs:2000 } }, interactor:{ resources:{ wallTimeLimitMs:2000 } } }, check:(result, elapsedMs) => result.contestant.termination === "wall-time-limit" && result.interactor.termination === "wall-time-limit" && elapsedMs >= 2000 && elapsedMs < 15000 },
+  { label:"interactive-cancel", contestant:readOne, interactor:readOne, options:{}, cancelAfterMs:1000, recovery:{ contestant:guessC, interactor:guessInteractor, options:{ interactor:guessInput(5) } }, check:(result, elapsedMs) => result.cancelled && elapsedMs < 10000 && guessed(result.recovery) },
+];
 const record = { policy, results:[], pageErrors:[], consoleErrors:[] };
 let browser;
 try {
@@ -145,6 +170,55 @@ try {
     }, [...await readFile(wasmPath)]);
     console.log(JSON.stringify({executionTiming:record.executionTiming}));
   }
+  const interactiveSelected = interactiveFixtures.filter(fixture => selected.length === 0 || selected.includes("interactive") || selected.includes(fixture.label));
+  if (interactiveSelected.length > 0) record.interactive = [];
+  for (const fixture of interactiveSelected) {
+    console.log(`START ${fixture.label}`);
+    const { check, ...input } = fixture;
+    const outcome = await page.evaluate(async fixture => {
+      const entries = { c:"main.c", cpp:"main.cpp", python:"main.py" };
+      window.interactiveBuilds ??= new Map();
+      const build = async program => {
+        const key = `${program.language}\0${program.source}`;
+        if (!window.interactiveBuilds.has(key)) {
+          const entry = entries[program.language];
+          const files = { [entry]:program.source };
+          if (program.language === "cpp") files["src/bits/stdc++.h"] = window.header;
+          const built = await window.engine.compile({ language:program.language, target:"wasip1", optimization:"release", entry, files, projectId:`csp-interactive-${window.interactiveBuilds.size}` }, { cache:false });
+          if (!built.success || !built.artifact) throw new Error(`${program.language} build failed: ${built.stderr}`);
+          window.interactiveBuilds.set(key, built.artifact);
+        }
+        return window.interactiveBuilds.get(key);
+      };
+      try {
+        const contestant = await build(fixture.contestant);
+        const interactor = await build(fixture.interactor);
+        const start = performance.now();
+        if (fixture.cancelAfterMs === undefined) {
+          const result = await window.engine.interact(contestant, interactor, fixture.options);
+          return { result, elapsedMs:Math.round(performance.now() - start) };
+        }
+        const pending = window.engine.interact(contestant, interactor, fixture.options);
+        const timer = setTimeout(() => window.engine.cancel(), fixture.cancelAfterMs);
+        let cancelled = false;
+        let error;
+        try { await pending; } catch (caught) { cancelled = true; error = String(caught); } finally { clearTimeout(timer); }
+        const elapsedMs = Math.round(performance.now() - start);
+        const recovery = await window.engine.interact(await build(fixture.recovery.contestant), await build(fixture.recovery.interactor), fixture.recovery.options);
+        return { result:{ cancelled, error, recovery }, elapsedMs };
+      } catch (error) { return { error:String(error) }; }
+    }, input);
+    const pass = !outcome.error && check(outcome.result, outcome.elapsedMs);
+    const summary = outcome.result && !outcome.result.recovery ? {
+      contestant:{ code:outcome.result.contestant.code, termination:outcome.result.contestant.termination, cost:outcome.result.contestant.metrics?.cost },
+      interactor:{ code:outcome.result.interactor.code, termination:outcome.result.interactor.termination, cost:outcome.result.interactor.metrics?.cost },
+      contestantToInteractorBytes:outcome.result.contestantToInteractor.length,
+      interactorToContestantBytes:outcome.result.interactorToContestant.length,
+    } : outcome.result;
+    record.interactive.push({ label:fixture.label, pass, elapsedMs:outcome.elapsedMs, error:outcome.error, result:outcome.result });
+    await writeFile(path.join(output,"results.json"),JSON.stringify(record,null,2)+"\n");
+    console.log(JSON.stringify({ label:fixture.label, pass, elapsedMs:outcome.elapsedMs, error:outcome.error, summary }));
+  }
   record.capabilities = [];
   for (const invoke of [false, true]) {
     const wasmPath = path.join(output, `capability-${invoke}.wasm`);
@@ -177,5 +251,5 @@ finally {
   await browser?.close();
   await new Promise(resolve => server.close(resolve));
 }
-if(record.results.some(result=>!result.pass)||record.capabilities?.some(result=>!result.pass)||record.executionTiming?.pass===false)process.exitCode=1;
+if(record.results.some(result=>!result.pass)||record.capabilities?.some(result=>!result.pass)||record.executionTiming?.pass===false||record.interactive?.some(result=>!result.pass))process.exitCode=1;
 console.log(`EVIDENCE ${path.join(output,"results.json")}`);

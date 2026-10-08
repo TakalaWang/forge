@@ -1,6 +1,7 @@
+use crate::run::web_interactive::{HostStreams, InteractiveSideRequest, run_side};
 use crate::{
     GoCompilerSession as CoreGoCompilerSession, GoCompilerSessionConfig, GoCompilerSessionRequest,
-    InteractiveRequest, RunError, RunRequest, interactive_response, run_response_from_result,
+    RunError, RunFailure, RunRequest, run_response_from_result,
 };
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -72,17 +73,62 @@ impl WebGoCompilerSession {
     }
 }
 
+/// Runs one side of an interactive session in the calling Worker. `read`,
+/// `wait` and `write` block on the session's shared ring buffers; `poll`
+/// checks the input without blocking; `close(fd)` closes the input (0) or
+/// output (1) end when the guest drops it.
 #[wasm_bindgen]
-pub async fn interact_wasm_oj(request: JsValue) -> Result<JsValue, JsValue> {
+pub fn run_interactive_side(
+    request: JsValue,
+    read: js_sys::Function,
+    poll: js_sys::Function,
+    wait: js_sys::Function,
+    write: js_sys::Function,
+    close: js_sys::Function,
+    on_execution: js_sys::Function,
+) -> Result<JsValue, JsValue> {
     console_error_panic_hook::set_once();
-    let request: InteractiveRequest = serde_wasm_bindgen::from_value(request)
-        .map_err(|error| JsValue::from_str(&format!("invalid interactive request: {error}")))?;
-    let response = interactive_response(request).await;
+    let request: InteractiveSideRequest =
+        serde_wasm_bindgen::from_value(request).map_err(|error| {
+            JsValue::from_str(&format!("invalid interactive side request: {error}"))
+        })?;
+    let response = match run_side(
+        request,
+        HostStreams::new(read, poll, wait, write, close),
+        |running| {
+            on_execution
+                .call1(&JsValue::UNDEFINED, &JsValue::from_bool(running))
+                .map(|_| ())
+                .map_err(|error| RunError::Runtime(format!("execution observer failed: {error:?}")))
+        },
+    ) {
+        Ok(result) => InteractiveSideResponse {
+            ok: true,
+            result: Some(result),
+            error: None,
+        },
+        Err(error) => InteractiveSideResponse {
+            ok: false,
+            result: None,
+            error: Some(RunFailure {
+                code: error.code(),
+                message: error.to_string(),
+            }),
+        },
+    };
     response
         .serialize(&serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true))
         .map_err(|error| {
             JsValue::from_str(&format!(
-                "failed to serialize interactive response: {error}"
+                "failed to serialize interactive side response: {error}"
             ))
         })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InteractiveSideResponse {
+    ok: bool,
+    result: Option<crate::run::web_interactive::InteractiveSideResult>,
+    error: Option<RunFailure>,
 }

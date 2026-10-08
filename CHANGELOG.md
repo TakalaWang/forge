@@ -25,6 +25,13 @@ All notable changes to WASM-OJ are recorded here. Releases follow
   self-delimiting archive or JSON compiler response is complete instead of waiting for
   `Instance.wait()`. A guest that exits before completing its output still fails with its
   stderr, about 2 s after it exits.
+- Fix browser `Engine.interact`, which failed on every dialogue (#98). Each side now runs in its
+  own nested Worker as a standalone metered run, connected to the other through shared-memory pipes
+  that block with `Atomics.wait`. Browser interactive costs equal `run` costs for the same program.
+  Each pipe holds the writing side's whole output budget, and closing stdin or stdout signals the
+  peer at once, so browser and server give the same verdicts. The runner Worker also sends
+  `startupEntropyBytes` for interactive programs. The refreshed runtime identity changes cost
+  profiles.
 
 ## 0.2.3 - 2026-10-05
 
