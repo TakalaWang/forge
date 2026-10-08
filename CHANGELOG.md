@@ -6,6 +6,9 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 
 ## Unreleased
 
+- Fixed a host process crash (`Uncaught Error: write EPIPE`) when `ServerRunner` cancelled or
+  timed out a runtime preparation stage, run or interactive session while its request was
+  still being written to the child's stdin. Late stdin errors after cleanup are now ignored.
 - Interactive contestants and interactors now use the same in-module instruction meter as
   standalone runs, and the runtime reads each program's counter when it exits. They are charged
   exactly what a standalone run charges for the same code; the previous host meter left out the
@@ -16,11 +19,19 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 - Accept runtime-bundle interactors (for example CPython) in `Runner.interact` on the server
   and in the browser runner Worker. Either side of an interactive session may now be a
   standalone Wasm module or a runtime bundle that provides streaming fd 0.
+- Fixed Python runtime preparation and TypeScript compilation occasionally stalling until their
+  300 s and 120 s timeouts. The Wasmer SDK can terminate its workers before stdout/stderr reach
+  EOF even though all output has arrived, so the server and browser now finish once the
+  self-delimiting archive or JSON compiler response is complete instead of waiting for
+  `Instance.wait()`. A guest that exits before completing its output still fails with its
+  stderr, about 2 s after it exits.
 - Fix browser `Engine.interact`, which failed on every dialogue (#98). Each side now runs in its
   own nested Worker as a standalone metered run, connected to the other through shared-memory pipes
   that block with `Atomics.wait`. Browser interactive costs equal `run` costs for the same program.
-  The runner Worker also sends `startupEntropyBytes` for interactive programs. The refreshed
-  runtime identity changes cost profiles.
+  Each pipe holds the writing side's whole output budget, and closing stdin or stdout signals the
+  peer at once, so browser and server give the same verdicts. The runner Worker also sends
+  `startupEntropyBytes` for interactive programs. The refreshed runtime identity changes cost
+  profiles.
 
 ## 0.2.3 - 2026-10-05
 

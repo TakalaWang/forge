@@ -1,5 +1,6 @@
 import { WASM_OJ_STORAGE } from "../core/contract.ts";
 import { sha256Hex } from "../core/hash.ts";
+import { readProcessMessage, type StreamingProcess } from "../core/process-output.ts";
 
 const MAGIC = new TextEncoder().encode("WOJFS002");
 const HEADER_BYTES = 12;
@@ -94,6 +95,34 @@ export function decodeRuntimeFiles(archive: Uint8Array): Record<string, Uint8Arr
     throw new Error("Runtime file archive contains trailing bytes.");
   }
   return files;
+}
+
+/**
+ * Read an export until stdout holds a complete archive and return exactly its framed bytes.
+ * `@wasmer/sdk` `Instance.wait()` can hang after all output arrived; see readProcessMessage.
+ */
+export async function readRuntimeFilesExport(
+  exporter: StreamingProcess,
+  idleGraceMs?: number,
+): Promise<Uint8Array> {
+  const { message, stderr } = await readProcessMessage(exporter, completeArchive, { idleGraceMs });
+  if (message === undefined) {
+    throw new Error(`The runtime file export ended before its archive was complete: ${stderr}`);
+  }
+  return message;
+}
+
+function completeArchive(bytes: Uint8Array): Uint8Array | undefined {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = MAGIC.byteLength;
+  while (offset + HEADER_BYTES <= bytes.byteLength) {
+    const pathLength = view.getUint32(offset, true);
+    const dataLength = Number(view.getBigUint64(offset + 4, true));
+    offset += HEADER_BYTES;
+    if (pathLength === 0 && dataLength === 0) return bytes.slice(0, offset);
+    offset += pathLength + dataLength;
+  }
+  return undefined;
 }
 
 export async function verifyAndDecodeRuntimeFiles(

@@ -46,6 +46,7 @@ import {
   openOptionalRuntimeFilesCache,
   restoreOrExportRuntimeFiles,
 } from "@/src/runtime/runtime-files-cache";
+import { readRuntimeFilesExport } from "@/src/runner/runtime-files";
 import {
   PackageHandleCache,
   WasmerPackageHandle,
@@ -284,7 +285,7 @@ async function exportPackageFileSystem(
       },
       async () => {
         const lease = await acquirePackage(request.packageSpecifier);
-        const output = await withHandleLease(
+        return withHandleLease(
           lease,
           (pkg) => withWasmerCommand(pkg, request.command, async (command) => {
             const instance = await command.run({
@@ -295,15 +296,17 @@ async function exportPackageFileSystem(
                 PYTHONDONTWRITEBYTECODE: "1",
               },
             });
-            return instance.wait();
+            try {
+              return await readRuntimeFilesExport(instance);
+            } catch (error) {
+              throw new Error(
+                `Unable to export runtime files from ${request.packageSpecifier}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            } finally {
+              instance.free();
+            }
           }),
         );
-        if (!output.ok) {
-          throw new Error(
-            `Unable to export runtime files from ${request.packageSpecifier}: exit ${output.code}: ${output.stderr}`,
-          );
-        }
-        return output.stdoutBytes.slice();
       },
     );
   })();

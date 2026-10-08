@@ -11,6 +11,7 @@ import {
   PYTHON_PACKAGE,
   PYTHON_PACKAGE_SHA256,
 } from "../core/toolchains.ts";
+import { readRuntimeFilesExport } from "../runner/runtime-files.ts";
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_RESULT_BYTES = 256 * 1024 * 1024;
@@ -59,14 +60,15 @@ try {
         PYTHONDONTWRITEBYTECODE: "1",
       },
     }));
-    const output = await withProcessKeepalive(instance.wait());
-    if (!output.ok) {
+    try {
+      bytes = await withProcessKeepalive(readRuntimeFilesExport(instance));
+    } catch (error) {
       throw new Error(
-        `Unable to export runtime files from ${input.request.packageSpecifier}: `
-        + `exit ${output.code}: ${boundedText(output.stderr)}`,
+        `Unable to export runtime files from ${input.request.packageSpecifier}: ${boundedText(errorText(error))}`,
       );
+    } finally {
+      instance.free();
     }
-    bytes = output.stdoutBytes.slice();
   }
 
   if (bytes.byteLength > MAX_RESULT_BYTES) {

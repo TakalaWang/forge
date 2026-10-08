@@ -1,9 +1,9 @@
 import {
   Runtime,
   Wasmer,
-  type Output,
 } from "@wasmer/sdk";
 import { WASM_OJ_CONTRACT_VERSION } from "../core/contract.ts";
+import { completeJsonObject, readProcessMessage } from "../core/process-output.ts";
 import {
   canonicalRuntimeBundleFiles,
   createRuntimeBundleManifest,
@@ -307,7 +307,7 @@ interface TypeScriptWasiResponse {
   files: Record<string, string>;
 }
 
-async function transpileScriptProject(project: Project, requestId: string): Promise<{ files: Record<string, string | Uint8Array>; output: Output; response?: TypeScriptWasiResponse }> {
+async function transpileScriptProject(project: Project, requestId: string): Promise<{ files: Record<string, string | Uint8Array>; stderr: string; response?: TypeScriptWasiResponse }> {
   const scriptFiles = scriptSourceFiles(project);
   const emittedFiles = emittedSourceFiles(project);
   const dependencyFiles = npmDependencyFiles(project);
@@ -337,15 +337,14 @@ async function transpileScriptProject(project: Project, requestId: string): Prom
       outputs: outputPaths.map((path) => `/project/build/${path}`),
     }),
   });
-  const output = await instance.wait();
-  let response: TypeScriptWasiResponse | undefined;
-  if (output.ok) {
-    try {
-      response = JSON.parse(output.stdout) as TypeScriptWasiResponse;
-    } catch {
-      response = undefined;
-    }
-  }
+  // Instance.wait() can hang after all output arrived (see readProcessMessage). It is also the only
+  // way to read the exit code, so a complete response, the driver's last write, stands in for exit 0.
+  const output = await readProcessMessage<TypeScriptWasiResponse>(
+    instance,
+    completeJsonObject,
+    { collectStderr: true },
+  ).finally(() => instance.free());
+  const response = output.message;
   const files: Record<string, string | Uint8Array> = {};
   if (response) {
     for (const outputPath of outputPaths) {
@@ -354,7 +353,7 @@ async function transpileScriptProject(project: Project, requestId: string): Prom
     }
   }
   Object.assign(files, dependencyFiles);
-  return { files, output, response };
+  return { files, stderr: output.stderr, response };
 }
 
 async function buildScript(project: Project, cacheKey: string, requestId: string): Promise<BuildResult> {
@@ -388,11 +387,11 @@ async function buildScript(project: Project, cacheKey: string, requestId: string
     progress(requestId, "compiling", "Compiling TypeScript with TypeScript/WASI", 0.5);
     const transpiled = await transpileScriptProject(project, requestId);
     files = transpiled.files;
-    stderr = transpiled.output.stderr;
+    stderr = transpiled.stderr;
     diagnostics = parseTypeScriptDiagnostics(transpiled.response?.diagnostics ?? "");
     const emittedOutputsPresent = emittedSourceFiles(project)
       .every((file) => Object.hasOwn(files, emittedScriptPath(file.path)));
-    if (!transpiled.output.ok || !transpiled.response || transpiled.response.status !== 0 || !emittedOutputsPresent || diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
+    if (!transpiled.response || transpiled.response.status !== 0 || !emittedOutputsPresent || diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
       return {
         success: false,
         diagnostics: ensureFailureDiagnostic(diagnostics, {
