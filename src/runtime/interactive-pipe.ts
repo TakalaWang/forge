@@ -95,6 +95,7 @@ export class InteractivePipeReader extends InteractivePipeEnd {
 export class InteractivePipeWriter extends InteractivePipeEnd {
   /** Blocks until every byte is buffered. Returns the count written, or -1 if the reader closed before it finished. */
   write(bytes: Uint8Array): number {
+    if (Atomics.load(this.header, READER_CLOSED) !== 0) return -1;
     let offset = 0;
     while (offset < bytes.length) {
       const sequence = this.sequence();

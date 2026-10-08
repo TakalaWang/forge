@@ -514,7 +514,7 @@ function startInteractiveSide(role: InteractiveRole, start: InteractiveSideStart
     });
     worker.addEventListener("error", (event) => {
       event.preventDefault();
-      reject(Object.assign(new Error(event.message || `The interactive ${role} Worker crashed.`), { code: "RUNTIME_ERROR" }));
+      reject(Object.assign(new Error(`The interactive ${role} Worker crashed${event.message ? `: ${event.message}` : "."}`), { code: "RUNTIME_ERROR" }));
     });
   });
   try {

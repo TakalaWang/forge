@@ -71,6 +71,7 @@ describe("interactive pipe", () => {
     const writer = new InteractivePipeWriter(buffer);
     new InteractivePipeReader(buffer).close();
     expect(writer.write(bytes("ignored"))).toBe(-1);
+    expect(writer.write(new Uint8Array())).toBe(-1);
   });
 
   it("fails a write the reader closes on partway, like the server's broken pipe", () => {
