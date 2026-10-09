@@ -7,6 +7,12 @@ const WRITER_CLOSED = 2;
 const READER_CLOSED = 3;
 const SEQUENCE = 4;
 const HEADER_BYTES = 32;
+/**
+ * WebKit does not stop a Worker that `terminate()` catches inside `Atomics.wait` until the wait
+ * returns, and Chromium waits up to 2 s. Waking periodically lets a terminated side Worker stop,
+ * and release its liveness lock, promptly.
+ */
+const WAIT_SLICE_MS = 100;
 
 /**
  * The smallest ring that holds a writer's whole output budget. Only budgeted stdout bytes enter
@@ -49,7 +55,7 @@ class InteractivePipeEnd {
   }
 
   protected sleep(sequence: number): void {
-    Atomics.wait(this.header, SEQUENCE, sequence);
+    Atomics.wait(this.header, SEQUENCE, sequence, WAIT_SLICE_MS);
   }
 }
 

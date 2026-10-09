@@ -27,6 +27,9 @@ const bootstrap = `import { createBrowserEngine, WASM_OJ_LIBCXX_PCH_HEADER } fro
 window.cspViolations = []; addEventListener('securitypolicyviolation', e => window.cspViolations.push({directive:e.effectiveDirective, blockedURI:e.blockedURI, source:e.sourceFile}));
 try { new Function('return 1')(); window.evalBlocked = false; } catch { window.evalBlocked = true; }
 window.header = WASM_OJ_LIBCXX_PCH_HEADER;
+const NativeWorker = Worker; window.createdWorkers = [];
+window.Worker = class extends NativeWorker { constructor(url, options) { super(url, options); window.createdWorkers.push({ name:options?.name, worker:this }); } };
+window.killWorker = name => NativeWorker.prototype.terminate.call(window.createdWorkers.findLast(entry => entry.name === name).worker);
 window.engine = await createBrowserEngine({ artifactCache:false, toolchains: ${JSON.stringify(sources)} });
 window.ready = true;`;
 const server = createServer(async (req, res) => {
@@ -228,6 +231,104 @@ try {
     await writeFile(path.join(output,"results.json"),JSON.stringify(record,null,2)+"\n");
     console.log(JSON.stringify({ label:fixture.label, pass, elapsedMs:outcome.elapsedMs, error:outcome.error, summary }));
   }
+  if (selected.length === 0 || selected.includes("liveness")) {
+    record.liveness = [];
+    const sources = {
+      readOne:{ language:"c", source:'#include <stdio.h>\nint main(void){int x;return scanf("%d",&x)==1?0:1;}' },
+      yieldLoop:{ language:"c", source:'#include <sched.h>\nint main(void){for(;;)sched_yield();}' },
+      computeLoop:{ language:"cpp", source:'int main(){volatile unsigned long long spin=0;for(;;)spin=spin+1;}' },
+      guessContestant:guessC,
+      guessInteractor,
+    };
+    const prepared = await page.evaluate(async sources => {
+      window.livenessBuilds = {};
+      for (const [name, { language, source }] of Object.entries(sources)) {
+        const entry = language === "cpp" ? "main.cpp" : "main.c";
+        const files = { [entry]:source };
+        if (language === "cpp") files["src/bits/stdc++.h"] = window.header;
+        const built = await window.engine.compile({ language, target:"wasip1", optimization:"release", entry, files, projectId:`csp-liveness-${name}` }, { cache:false });
+        if (!built.success || !built.artifact) throw new Error(`liveness build ${name} failed: ${built.stderr}`);
+        window.livenessBuilds[name] = built.artifact;
+      }
+      const summary = value => value.termination ?? (value.contestant ? `${value.contestant.termination}/${value.interactor.code}` : `compiled:${value.success}`);
+      window.settle = promise => promise.then(value => ({ ok:true, summary:summary(value), stderr:value.stderr, at:performance.now() }), error => ({ ok:false, error:String(error), at:performance.now() }));
+      const blocked = { contestant:{ resources:{ wallTimeLimitMs:20000 } }, interactor:{ resources:{ wallTimeLimitMs:20000 } } };
+      window.livenessOperation = operation => {
+        const builds = window.livenessBuilds;
+        if (operation === "interact") return window.engine.interact(builds.readOne, builds.readOne, blocked);
+        if (operation === "run-yielding") return window.engine.run(builds.yieldLoop, { resources:{ instructionBudget:1e15, wallTimeLimitMs:20000 } });
+        if (operation === "run-compute") return window.engine.run(builds.computeLoop, { resources:{ instructionBudget:1e15, wallTimeLimitMs:15000 } });
+        if (operation === "compile-rust") return window.engine.compile({ language:"rust", target:"wasip1", optimization:"release", entry:"main.rs", files:{ "main.rs":'fn main(){println!("{}", 42);}' }, projectId:"csp-liveness-rust" }, { cache:false });
+        return window.engine.compile({ language:"cpp", target:"wasip1", optimization:"release", entry:"main.cpp", files:{ "main.cpp":"#include <iostream>\n#include <regex>\nint main(){std::regex r(\"a+\");std::cout<<std::regex_match(\"aaa\",r)<<std::endl;}" }, projectId:"csp-liveness-compile" }, { cache:false });
+      };
+    }, sources).then(() => undefined, error => String(error));
+    if (prepared) record.liveness.push({ label:"liveness-preparation", pass:false, error:prepared });
+    const workerNamed = async name => {
+      const nameOf = worker => Promise.race([worker.evaluate(() => self.name).catch(() => ""), new Promise(resolve => setTimeout(resolve, 3000, ""))]);
+      for (let attempt = 0; attempt < 5; attempt++) {
+        for (const worker of page.workers().reverse()) if (await nameOf(worker) === name) return worker;
+        await page.waitForTimeout(500);
+      }
+      throw new Error(`The ${name} Worker is not visible to Playwright.`);
+    };
+    const nestedKiller = async (parentName, childName, settleMs = 0) => {
+      const parent = await workerNamed(parentName);
+      await parent.evaluate(() => {
+        if (self.livenessWorkers) return;
+        const Native = self.Worker; self.livenessWorkers = []; self.nativeTerminate = Native.prototype.terminate;
+        self.Worker = class extends Native { constructor(url, options) { super(url, options); self.livenessWorkers.push({ name:options?.name, worker:this }); } };
+      });
+      return () => parent.evaluate(async ([name, settleMs]) => {
+        for (let attempt = 0; attempt < 600 && !self.livenessWorkers.some(entry => entry.name === name); attempt++) await new Promise(resolve => setTimeout(resolve, 100));
+        await new Promise(resolve => setTimeout(resolve, settleMs));
+        self.nativeTerminate.call(self.livenessWorkers.findLast(entry => entry.name === name).worker);
+      }, [childName, settleMs]);
+    };
+    const pageKiller = name => () => page.evaluate(name => window.killWorker(name), name);
+    const browserName = process.env.WASM_OJ_BROWSER ?? "chromium";
+    const crashed = (outcome, killMs, limitMs) => /stopped without reporting an error/.test(outcome.ok ? outcome.stderr ?? "" : outcome.error) && killMs < limitMs;
+    const livenessCases = [
+      { label:"liveness-interactive-contestant", operation:"interact", killer:() => nestedKiller("wasm-oj-runner", "wasm-oj-interactive-contestant"), check:(outcome, killMs) => crashed(outcome, killMs, 3000) && outcome.error.includes("interactive contestant Worker") },
+      { label:"liveness-interactive-interactor", operation:"interact", killer:() => nestedKiller("wasm-oj-runner", "wasm-oj-interactive-interactor"), check:(outcome, killMs) => crashed(outcome, killMs, 3000) && outcome.error.includes("interactive interactor Worker") },
+      { label:"liveness-runner-interact", operation:"interact", killer:async () => pageKiller("wasm-oj-runner"), check:(outcome, killMs) => crashed(outcome, killMs, 3000) },
+      { label:"liveness-runner-run-yielding", operation:"run-yielding", killer:async () => pageKiller("wasm-oj-runner"), check:(outcome, killMs) => crashed(outcome, killMs, 4000) },
+      { label:"liveness-runner-run-compute", operation:"run-compute", killer:async () => pageKiller("wasm-oj-runner"), check:(outcome, killMs) => browserName === "webkit" ? outcome.ok && outcome.summary === "wall-time-limit" : crashed(outcome, killMs, 4000) },
+      { label:"liveness-compiler", operation:"compile", killAfterMs:300, killer:async () => pageKiller("wasm-oj-compiler"), check:(outcome, killMs) => crashed(outcome, killMs, 4000) },
+      { label:"liveness-compiler-stage", operation:"compile-rust", killAfterMs:0, killer:() => nestedKiller("wasm-oj-compiler", "wasm-oj-rustc-stage", 1000), check:(outcome, killMs) => crashed(outcome, killMs, 4000) },
+    ];
+    for (const fixture of prepared ? [] : livenessCases) {
+      console.log(`START ${fixture.label}`);
+      let outcome; let killMs; let error;
+      try {
+        const kill = await fixture.killer();
+        await page.evaluate(operation => { window.livenessPending = window.settle(window.livenessOperation(operation)); }, fixture.operation);
+        await page.waitForTimeout(fixture.killAfterMs ?? 1500);
+        await kill();
+        const killedAt = await page.evaluate(() => performance.now());
+        outcome = await page.evaluate(() => window.livenessPending);
+        killMs = Math.round(outcome.at - killedAt);
+      } catch (caught) { error = String(caught); }
+      const recovery = await page.evaluate(() => window.settle(window.engine.run(window.livenessBuilds.readOne, { stdin:"7\n" })));
+      const pass = !error && fixture.check(outcome, killMs) && recovery.summary === "exited";
+      record.liveness.push({ label:fixture.label, pass, killMs, outcome, error, recovery });
+      await writeFile(path.join(output,"results.json"),JSON.stringify(record,null,2)+"\n");
+      console.log(JSON.stringify({ label:fixture.label, pass, killMs, error, outcome, recovery:recovery.summary ?? recovery.error }));
+    }
+    if (!prepared) {
+      console.log("START liveness-no-false-positive");
+      const steady = await page.evaluate(async () => {
+        const outcomes = [];
+        const builds = window.livenessBuilds;
+        for (let index = 0; index < 20; index++) outcomes.push(await window.settle(window.engine.run(builds.readOne, { stdin:`${index}\n` })));
+        for (let index = 0; index < 5; index++) outcomes.push(await window.settle(window.engine.interact(builds.guessContestant, builds.guessInteractor, { interactor:{ args:["/judge/input.txt"], files:{ "/judge/input.txt":`${index + 1} 25\n` } } })));
+        outcomes.push(await window.settle(window.engine.compile({ language:"c", target:"wasip1", optimization:"release", entry:"main.c", files:{ "main.c":"int main(void){return 0;}" }, projectId:"csp-liveness-steady" }, { cache:false })));
+        return outcomes.map(outcome => outcome.summary ?? outcome.error);
+      });
+      const steadyPass = steady.length === 26 && steady.slice(0, 20).every(value => value === "exited") && steady.slice(20, 25).every(value => value === "exited/0") && steady[25] === "compiled:true";
+      record.liveness.push({ label:"liveness-no-false-positive", pass:steadyPass, outcomes:steady });
+      console.log(JSON.stringify({ label:"liveness-no-false-positive", pass:steadyPass, outcomes:steady }));
+    } else console.log(JSON.stringify({ label:"liveness-preparation", pass:false, error:prepared }));
+  }
   record.capabilities = [];
   for (const invoke of [false, true]) {
     const wasmPath = path.join(output, `capability-${invoke}.wasm`);
@@ -260,5 +361,5 @@ finally {
   await browser?.close();
   await new Promise(resolve => server.close(resolve));
 }
-if(record.results.some(result=>!result.pass)||record.capabilities?.some(result=>!result.pass)||record.executionTiming?.pass===false||record.interactive?.some(result=>!result.pass))process.exitCode=1;
+if(record.results.some(result=>!result.pass)||record.capabilities?.some(result=>!result.pass)||record.executionTiming?.pass===false||record.interactive?.some(result=>!result.pass)||record.liveness?.some(result=>!result.pass))process.exitCode=1;
 console.log(`EVIDENCE ${path.join(output,"results.json")}`);

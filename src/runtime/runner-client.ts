@@ -20,7 +20,7 @@ import type {
   CostBaselineRegistry,
 } from "@wasm-oj/core";
 import RunnerWorkerUrl from "./runner.worker?worker&url";
-import { createModuleWorker } from "./module-worker";
+import { createModuleWorker, onModuleWorkerLost } from "./module-worker";
 import { validateBrowserRuntimeDriverPlugins } from "./browser-runtime-plugin";
 import { runtimePreparationTimeoutMs } from "../runner/preparation-timeout-policy";
 
@@ -278,13 +278,14 @@ export class BrowserRunner implements Runner {
     worker.addEventListener("message", (event: MessageEvent<RunnerResponse>) => {
       if (!this.disposed && this.worker === worker) this.handleMessage(event.data);
     });
-    worker.addEventListener("error", (event) => {
-      const error = new Error(event.message || "The runner worker crashed.");
+    const crashed = (error: Error) => {
       if (this.disposed || this.worker !== worker) return;
       const canRecover = this.workerInitialized;
       this.stopWorker(error);
       if (canRecover) this.installWorker();
-    });
+    };
+    worker.addEventListener("error", (event) => crashed(new Error(event.message || "The runner worker crashed.")));
+    onModuleWorkerLost(worker, crashed);
     return worker;
   }
 

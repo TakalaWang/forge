@@ -3,6 +3,7 @@ import {
   createModuleWorker,
   createModuleWorkerBootstrap,
   moduleWorkerBaseUrl,
+  onModuleWorkerLost,
 } from "./module-worker";
 
 interface WorkerConstruction {
@@ -11,15 +12,42 @@ interface WorkerConstruction {
 }
 
 const constructions: WorkerConstruction[] = [];
+const workers: FakeWorker[] = [];
 
-class FakeWorker {
+class FakeWorker extends EventTarget {
+  terminated = false;
+
   constructor(url: string | URL, options?: WorkerOptions) {
+    super();
     constructions.push({ url, options });
+    workers.push(this);
+  }
+
+  terminate(): void {
+    this.terminated = true;
   }
 }
 
+interface LockRequest {
+  name: string;
+  signal: AbortSignal;
+  grant(): void;
+}
+
+const lockRequests: LockRequest[] = [];
+const fakeLocks = {
+  request(name: string, options: { signal: AbortSignal }, callback: () => void): Promise<void> {
+    return new Promise((resolve) => {
+      lockRequests.push({ name, signal: options.signal, grant: () => resolve(callback()) });
+    });
+  },
+};
+
 beforeEach(() => {
   constructions.length = 0;
+  workers.length = 0;
+  lockRequests.length = 0;
+  vi.stubGlobal("navigator", { locks: fakeLocks });
   vi.stubGlobal("location", {
     href: "https://wasm-oj.example/judge",
     origin: "https://wasm-oj.example",
@@ -50,6 +78,7 @@ describe("module Worker bootstrap", () => {
       "const queueMessage = (event) => { event.stopImmediatePropagation(); pendingMessages.push(event.data); };",
       'globalThis.addEventListener("message", queueMessage);',
       'Object.defineProperty(globalThis, "__wasmOjModuleWorkerBaseUrl", { value: "https://wasm-oj.example/judge" });',
+      'try { const lock = "wasm-oj-worker-" + crypto.randomUUID(); navigator.locks.request(lock, () => { postMessage({ __wasmOjWorkerLiveness: lock }); return new Promise(() => {}); }).catch(() => {}); } catch {}',
       'try { await import("https://wasm-oj.example/assets/compiler.worker.js"); } finally { globalThis.removeEventListener("message", queueMessage); }',
       'for (const data of pendingMessages) globalThis.dispatchEvent(new MessageEvent("message", { data }));',
       "",
@@ -90,11 +119,58 @@ describe("module Worker bootstrap", () => {
     expect(await (source as Blob).text()).toContain(
       'await import("https://wasm-oj.example/assets/wasmer-thread.worker.js")',
     );
+    expect(await (source as Blob).text()).not.toContain("__wasmOjWorkerLiveness");
 
     bootstrap.revoke();
     bootstrap.revoke();
     expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:https://wasm-oj.example/bootstrap");
+  });
+
+  it("reports a Worker whose liveness lock frees before its owner terminates it", async () => {
+    const worker = createModuleWorker("/assets/runner.worker.js", { name: "wasm-oj-runner" });
+    const messages: unknown[] = [];
+    const lost: string[] = [];
+    worker.addEventListener("message", (event) => messages.push((event as MessageEvent).data));
+    onModuleWorkerLost(worker, (error) => lost.push(error.message));
+
+    worker.dispatchEvent(new MessageEvent("message", { data: { __wasmOjWorkerLiveness: "wasm-oj-worker-1" } }));
+    worker.dispatchEvent(new MessageEvent("message", { data: { type: "ready" } }));
+    expect(messages).toEqual([{ type: "ready" }]);
+    expect(lockRequests.map(({ name }) => name)).toEqual(["wasm-oj-worker-1"]);
+    expect(lost).toEqual([]);
+
+    lockRequests[0]!.grant();
+    expect(lost).toEqual(["The wasm-oj-runner Worker stopped without reporting an error."]);
+
+    const late = await new Promise<string>((resolve) => onModuleWorkerLost(worker, (error) => resolve(error.message)));
+    expect(late).toBe("The wasm-oj-runner Worker stopped without reporting an error.");
+  });
+
+  it("stops watching a Worker once its owner terminates it", () => {
+    const worker = createModuleWorker("/assets/runner.worker.js", { name: "wasm-oj-runner" });
+    const lost: Error[] = [];
+    onModuleWorkerLost(worker, (error) => lost.push(error));
+    worker.dispatchEvent(new MessageEvent("message", { data: { __wasmOjWorkerLiveness: "wasm-oj-worker-2" } }));
+
+    worker.terminate();
+    lockRequests[0]!.grant();
+
+    expect(workers[0]?.terminated).toBe(true);
+    expect(lockRequests[0]?.signal.aborted).toBe(true);
+    expect(lost).toEqual([]);
+  });
+
+  it("keeps the previous behaviour when Web Locks are unavailable", () => {
+    vi.stubGlobal("navigator", {});
+    const worker = createModuleWorker("/assets/runner.worker.js");
+    const messages: unknown[] = [];
+    worker.addEventListener("message", (event) => messages.push((event as MessageEvent).data));
+
+    worker.dispatchEvent(new MessageEvent("message", { data: { __wasmOjWorkerLiveness: "wasm-oj-worker-3" } }));
+
+    expect(messages).toEqual([]);
+    expect(lockRequests).toEqual([]);
   });
 
   it("uses the injected browser base inside a blob Worker", () => {

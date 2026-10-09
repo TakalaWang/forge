@@ -60,6 +60,7 @@ import {
   createModuleWorkerBootstrap,
   type ModuleWorkerBootstrap,
   moduleWorkerBaseUrl,
+  onModuleWorkerLost,
 } from "./module-worker";
 import { createInteractivePipe, interactivePipeCapacity } from "./interactive-pipe";
 import type { InteractiveSideMessage, InteractiveSideStart } from "./interactive-side.worker";
@@ -515,10 +516,14 @@ function startInteractiveSide(role: InteractiveRole, start: InteractiveSideStart
         }
       }
     });
+    const crashed = (detail: string) => {
+      reject(Object.assign(new Error(`The interactive ${role} Worker crashed${detail ? `: ${detail}` : "."}`), { code: "RUNTIME_ERROR" }));
+    };
     worker.addEventListener("error", (event) => {
       event.preventDefault();
-      reject(Object.assign(new Error(`The interactive ${role} Worker crashed${event.message ? `: ${event.message}` : "."}`), { code: "RUNTIME_ERROR" }));
+      crashed(event.message);
     });
+    onModuleWorkerLost(worker, (error) => crashed(error.message));
   });
   try {
     worker.postMessage(start);

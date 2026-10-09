@@ -29,7 +29,7 @@ import {
   maximumOutputReadyRustStages,
 } from "../compiler/browser-rust-policy";
 import CompilerWorkerUrl from "./compiler.worker?worker&url";
-import { createModuleWorker } from "./module-worker";
+import { createModuleWorker, onModuleWorkerLost } from "./module-worker";
 import { prefetchBrowserToolchain } from "./toolchain-prefetch";
 import { clearClangBuildGraphCache } from "../compiler/indexeddb-build-graph-cache";
 
@@ -273,13 +273,14 @@ export class BrowserCompiler implements Compiler {
     worker.addEventListener("message", (event: MessageEvent<CompilerResponse>) => {
       if (!this.disposed && !this.workerDormant && this.worker === worker) this.handleMessage(event.data);
     });
-    worker.addEventListener("error", (event) => {
-      const error = new Error(event.message || "The compiler worker crashed.");
+    const crashed = (error: Error) => {
       if (this.disposed || this.workerDormant || this.worker !== worker) return;
       const canRecover = this.workerInitialized;
       this.stopWorker(error);
       if (canRecover) this.installWorker();
-    });
+    };
+    worker.addEventListener("error", (event) => crashed(new Error(event.message || "The compiler worker crashed.")));
+    onModuleWorkerLost(worker, crashed);
     return worker;
   }
 

@@ -44,6 +44,7 @@ const TEST_TOOLCHAINS = Object.freeze([{
 interface FakeWorker {
   readonly messages: unknown[];
   readonly listeners: Map<string, Set<(event: unknown) => void>>;
+  readonly lostListeners: Set<(error: Error) => void>;
   terminated: boolean;
   addEventListener(type: string, listener: (event: unknown) => void): void;
   postMessage(message: unknown): void;
@@ -65,6 +66,7 @@ vi.mock("./module-worker", () => ({
     const worker: FakeWorker = {
       messages: [],
       listeners: new Map(),
+      lostListeners: new Set(),
       terminated: false,
       addEventListener: () => undefined,
       postMessage: () => undefined,
@@ -86,6 +88,9 @@ vi.mock("./module-worker", () => ({
       : workerState.runners;
     collection.push(worker);
     return worker;
+  },
+  onModuleWorkerLost(worker: FakeWorker, listener: (error: Error) => void): void {
+    worker.lostListeners.add(listener);
   },
 }));
 
@@ -149,6 +154,46 @@ describe("browser client lifecycle", () => {
     const replacementReady = expect(compiler.ready()).rejects.toThrow("replacement load failed");
     dispatch(replacement, "error", { message: "replacement load failed" });
     await replacementReady;
+    expect(workerState.compilers).toHaveLength(2);
+    compiler.dispose();
+  });
+
+  it("rejects a running execution at once when the runner Worker is lost", async () => {
+    vi.useFakeTimers();
+    const runner = new BrowserRunner({ toolchains: TEST_TOOLCHAINS, additionalCostBaselines: { [TEST_COST_PROFILE]: 0 } });
+    try {
+      const worker = workerState.runners[0]!;
+      respondToInitialization(worker);
+      await runner.ready();
+      const pending = runner.run(wasmArtifact(), runConfig());
+      await Promise.resolve();
+      const { requestId } = requestOfType(worker, "run");
+      respond(worker, { type: "progress", requestId, progress: { phase: "running", label: "guest" } });
+      await vi.advanceTimersByTimeAsync(10);
+
+      lose(worker, "The wasm-oj-runner Worker stopped without reporting an error.");
+
+      await expect(pending).rejects.toThrow("The wasm-oj-runner Worker stopped without reporting an error.");
+      expect(worker.terminated).toBe(true);
+      expect(workerState.runners).toHaveLength(2);
+    } finally {
+      runner.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a build at once when the compiler Worker is lost", async () => {
+    const compiler = new BrowserCompiler({ toolchains: TEST_TOOLCHAINS });
+    const worker = workerState.compilers[0]!;
+    respondToInitialization(worker);
+    await compiler.ready();
+    const pending = compiler.build(javascriptProject(), "cache-key");
+    await vi.waitFor(() => expect(requestsOfType(worker, "build")).toHaveLength(1));
+
+    lose(worker, "The wasm-oj-compiler Worker stopped without reporting an error.");
+
+    await expect(pending).rejects.toThrow("The wasm-oj-compiler Worker stopped without reporting an error.");
+    expect(worker.terminated).toBe(true);
     expect(workerState.compilers).toHaveLength(2);
     compiler.dispose();
   });
@@ -709,6 +754,10 @@ function respondToInitialization(worker: FakeWorker): void {
 
 function dispatch(worker: FakeWorker, type: string, event: unknown): void {
   for (const listener of worker.listeners.get(type) ?? []) listener(event);
+}
+
+function lose(worker: FakeWorker, message: string): void {
+  for (const listener of worker.lostListeners) listener(new Error(message));
 }
 
 function respond(worker: FakeWorker, data: unknown): void {
