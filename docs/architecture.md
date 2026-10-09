@@ -154,7 +154,9 @@ or toolchain source.
 
 Before instantiation the runtime validates the module, removes non-semantic debug/name sections,
 preserves required runtime metadata, and injects a mutable 64-bit weighted instruction meter. The
-budget is present before a start section can execute. Static original-opcode counts and normalized
+budget is present before a start section can execute. A function that has a loop but no parameters
+or locals also gets one unused local: JavaScriptCore never optimizes such a loop and runs it about 20
+times slower than Chromium, so it would reach the wall deadline before its budget. Static original-opcode counts and normalized
 cost are reported separately from injected meter instructions.
 
 Contract 2 enforces:

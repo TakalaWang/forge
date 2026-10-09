@@ -88,12 +88,76 @@ impl std::fmt::Display for MeterInitializationError {
 
 impl std::error::Error for MeterInitializationError {}
 
+/// Sets the meter's initial budget and gives every function that has a loop but no parameters or
+/// locals one unused `i32` local. JavaScriptCore (Safari 26) never enters optimized code inside a
+/// loop of such a function: its baseline tier asks to tier up on almost every iteration and keeps
+/// running the slow path, so a metered empty loop runs about 20 times slower than in Chromium and
+/// hits the wall deadline before its instruction budget. The local changes neither behaviour nor
+/// cost.
 struct MeterInitializer {
     budget: i64,
+    parameterized_types: Vec<bool>,
+    function_types: Vec<u32>,
+    defined_functions: usize,
 }
 
 impl Reencode for MeterInitializer {
     type Error = MeterInitializationError;
+
+    fn parse_type_section(
+        &mut self,
+        types: &mut wasm_encoder::TypeSection,
+        section: wasmparser::TypeSectionReader<'_>,
+    ) -> Result<(), ReencodeError<Self::Error>> {
+        for group in section.clone() {
+            for ty in group?.types() {
+                self.parameterized_types
+                    .push(match &ty.composite_type.inner {
+                        wasmparser::CompositeInnerType::Func(function) => {
+                            !function.params().is_empty()
+                        }
+                        _ => true,
+                    });
+            }
+        }
+        wasm_encoder::reencode::utils::parse_type_section(self, types, section)
+    }
+
+    fn parse_function_section(
+        &mut self,
+        functions: &mut wasm_encoder::FunctionSection,
+        section: wasmparser::FunctionSectionReader<'_>,
+    ) -> Result<(), ReencodeError<Self::Error>> {
+        for function in section.clone() {
+            self.function_types.push(function?);
+        }
+        wasm_encoder::reencode::utils::parse_function_section(self, functions, section)
+    }
+
+    fn parse_function_body(
+        &mut self,
+        code: &mut wasm_encoder::CodeSection,
+        body: wasmparser::FunctionBody<'_>,
+    ) -> Result<(), ReencodeError<Self::Error>> {
+        let ordinal = self.defined_functions;
+        self.defined_functions += 1;
+        let parameterized = self
+            .function_types
+            .get(ordinal)
+            .and_then(|ty| self.parameterized_types.get(*ty as usize))
+            .copied()
+            .unwrap_or(true);
+        if parameterized || body.get_locals_reader()?.get_count() != 0 || !has_loop(&body)? {
+            return wasm_encoder::reencode::utils::parse_function_body(self, code, body);
+        }
+        let mut function = wasm_encoder::Function::new([(1, wasm_encoder::ValType::I32)]);
+        let mut operators = body.get_operators_reader()?;
+        while !operators.eof() {
+            function.instruction(&self.parse_instruction(&mut operators)?);
+        }
+        code.function(&function);
+        Ok(())
+    }
 
     fn parse_global_section(
         &mut self,
@@ -128,10 +192,25 @@ impl Reencode for MeterInitializer {
 fn set_initial_meter_budget(wasm: &[u8], budget: i64) -> Result<Vec<u8>, String> {
     validate_meter_global_position(wasm)?;
     let mut module = wasm_encoder::Module::new();
-    MeterInitializer { budget }
-        .parse_core_module(&mut module, wasmparser::Parser::new(0), wasm)
-        .map_err(|error| format!("failed to initialize weighted meter: {error}"))?;
+    MeterInitializer {
+        budget,
+        parameterized_types: Vec::new(),
+        function_types: Vec::new(),
+        defined_functions: 0,
+    }
+    .parse_core_module(&mut module, wasmparser::Parser::new(0), wasm)
+    .map_err(|error| format!("failed to initialize weighted meter: {error}"))?;
     Ok(module.finish())
+}
+
+fn has_loop(body: &wasmparser::FunctionBody<'_>) -> Result<bool, wasmparser::BinaryReaderError> {
+    let mut operators = body.get_operators_reader()?;
+    while !operators.eof() {
+        if matches!(operators.read()?, wasmparser::Operator::Loop { .. }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn validate_meter_global_position(wasm: &[u8]) -> Result<(), String> {
@@ -409,7 +488,7 @@ mod tests {
     use super::{METER_MODEL, instrument_wasm, weighted_opcode_cost};
     use std::borrow::Cow;
     use wasm_encoder::{Encode, Section};
-    use wasmparser::{ExternalKind, Parser, Payload};
+    use wasmparser::{ExternalKind, Parser, Payload, ValType};
 
     #[test]
     fn instrumentation_adds_the_metering_global() {
@@ -486,6 +565,47 @@ mod tests {
         assert_eq!(weighted_opcode_cost("MemoryAtomicWait32"), Some(1000));
         assert_eq!(weighted_opcode_cost("FutureInstruction"), Some(1000));
         assert_eq!(weighted_opcode_cost("AtomicFence"), Some(1000));
+    }
+
+    #[test]
+    fn functions_with_a_loop_and_no_params_or_locals_get_one_unused_local() {
+        let wasm = wat::parse_str(
+            r#"(module
+              (memory (export "memory") 1)
+              (func (export "_start") (loop (br 0)))
+              (func (local i64) (loop (br 0)))
+              (func (param i32) (loop (br 0)))
+              (func nop)
+              (func (block (loop (br 1)))))"#,
+        )
+        .unwrap();
+        let metered = instrument_wasm(&wasm, 1_000_000).unwrap();
+        let locals = Parser::new(0)
+            .parse_all(&metered.wasm)
+            .filter_map(Result::ok)
+            .filter_map(|payload| match payload {
+                Payload::CodeSectionEntry(body) => Some(
+                    body.get_locals_reader()
+                        .unwrap()
+                        .into_iter()
+                        .map(|local| local.unwrap())
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let i32_local = vec![(1, ValType::I32)];
+        assert_eq!(
+            locals,
+            [
+                i32_local.clone(),
+                vec![(1, ValType::I64)],
+                vec![],
+                vec![],
+                i32_local,
+                vec![],
+            ]
+        );
     }
 
     #[test]
