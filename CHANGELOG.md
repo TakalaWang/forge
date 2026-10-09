@@ -6,6 +6,14 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 
 ## Unreleased
 
+- Interactive writes no longer fail with `EPIPE` after the other side exits or closes its stdin. The
+  bytes are recorded in the transcript once and dropped, and the writer keeps running, as with a
+  judge that keeps draining both pipes. An interactor that replies to a contestant that already
+  exited now reads EOF and exits with its own verdict; a CPython interactor used to exit 120 and
+  repeat its reply up to five times in the transcript. Reads still return the remaining buffered
+  bytes and then EOF. This applies to the server and the browser. The refreshed runtime identity
+  changes cost profiles.
+
 ## 0.2.4 - 2026-10-09
 
 - Fixed a host process crash (`Uncaught Error: write EPIPE`) when `ServerRunner` cancelled or

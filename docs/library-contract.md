@@ -244,6 +244,15 @@ resource policies, process-local deterministic clocks, and secret inputs mounted
 interactor side. Either side may be a standalone Wasm module or a runtime bundle such as CPython;
 runtime bundles that cannot provide streaming fd 0 are rejected for interaction.
 
+A side that has exited, or closed its stdin, no longer reads, but its peer's writes to it still
+succeed: the bytes are dropped and the peer keeps running without `EPIPE`, as with a judge that keeps
+draining both programs' output until they exit. Reads from a side that has exited, or closed its
+stdout, return the bytes still buffered and then EOF. An interactor can therefore reply to a
+contestant that already exited, read EOF, and exit with its own verdict. `contestantToInteractor` and
+`interactorToContestant` record every byte each side wrote to stdout exactly once, up to its output
+limit, including bytes written after the peer exited. A transcript depends only on what its writer
+wrote, not on when the reader exited.
+
 Each case executes under the broad hard policy once. Correct output and the same normalized metrics
 are evaluated against ordered cumulative `baseline`, `efficient`, and `optimal` policies. The
 portable compute metric is `RunResult.metrics.cost`; wall time is only a safety boundary.

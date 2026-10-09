@@ -121,6 +121,9 @@ struct InteractiveOutput {
 }
 
 impl AsyncWrite for InteractiveOutput {
+    /// Once the peer has closed its stdin, for example by exiting, the pipe reports a broken
+    /// pipe. The bytes are already in the transcript, so the write succeeds and they are dropped,
+    /// as when a judge keeps draining a pipe whose reader is gone.
     fn poll_write(
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
@@ -128,7 +131,12 @@ impl AsyncWrite for InteractiveOutput {
     ) -> Poll<io::Result<usize>> {
         match Pin::new(&mut self.capture).poll_write(context, buffer) {
             Poll::Ready(Ok(written)) => {
-                Pin::new(&mut self.pipe).poll_write(context, &buffer[..written])
+                match Pin::new(&mut self.pipe).poll_write(context, &buffer[..written]) {
+                    Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe => {
+                        Poll::Ready(Ok(written))
+                    }
+                    result => result,
+                }
             }
             result => result,
         }
@@ -1118,6 +1126,128 @@ mod tests {
         let (standalone, interactive) = execute(&looping("unreachable"), 1_000_000);
         assert_eq!(standalone.termination, ExecutionTermination::Trap);
         assert_eq!(interactive.metrics.cost, standalone.metrics.cost);
+    }
+
+    const DRAIN_STDIN: &str = r#"
+      (func $drain_stdin (result i32)
+        (local $total i32)
+        (loop $again
+          (i32.store (i32.const 0) (i32.add (i32.const 256) (local.get $total)))
+          (i32.store (i32.const 4) (i32.const 64))
+          (if (call $fd_read (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 8))
+            (then (call $exit (i32.const 3))))
+          (local.set $total (i32.add (local.get $total) (i32.load (i32.const 8))))
+          (br_if $again (i32.load (i32.const 8))))
+        local.get $total)"#;
+
+    fn peer_program(body: &str, data: &str) -> Vec<u8> {
+        wat::parse_str(format!(
+            r#"(module
+              (import "wasi_snapshot_preview1" "fd_read"
+                (func $fd_read (param i32 i32 i32 i32) (result i32)))
+              (import "wasi_snapshot_preview1" "fd_write"
+                (func $fd_write (param i32 i32 i32 i32) (result i32)))
+              (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 128) "{data}")
+              {DRAIN_STDIN}
+              (func $write (param $length i32) (result i32)
+                (i32.store (i32.const 16) (i32.const 128))
+                (i32.store (i32.const 20) (local.get $length))
+                (call $fd_write (i32.const 1) (i32.const 16) (i32.const 1) (i32.const 24)))
+              (func (export "_start") {body}))"#
+        ))
+        .unwrap()
+    }
+
+    fn interact_pair(contestant: Vec<u8>, interactor: Vec<u8>) -> crate::InteractiveResult {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(interact(InteractiveRequest {
+                contestant: program(contestant),
+                interactor: program(interactor),
+                determinism: DeterminismConfig {
+                    random_seed: 7,
+                    realtime_epoch_ms: 946_684_800_000,
+                    clock_step_ns: 1_000_000,
+                },
+            }))
+            .unwrap()
+    }
+
+    #[test]
+    fn interactor_writes_to_an_exited_contestant_without_a_broken_pipe() {
+        let contestant = peer_program("(drop (call $write (i32.const 2)))", "1\\n");
+        let interactor = peer_program(
+            r#"(local $errno i32)
+              (drop (call $drain_stdin))
+              (local.set $errno (call $write (i32.const 8)))
+              (if (local.get $errno) (then (call $exit (local.get $errno))))
+              (if (i32.ne (i32.load (i32.const 24)) (i32.const 8)) (then (call $exit (i32.const 4))))
+              (call $exit (i32.const 42))"#,
+            "correct\\n",
+        );
+
+        let result = interact_pair(contestant, interactor);
+
+        assert_eq!(result.contestant.termination, ExecutionTermination::Exited);
+        assert_eq!(result.contestant.code, 0);
+        assert_eq!(result.interactor.termination, ExecutionTermination::Exited);
+        assert_eq!(result.interactor.code, 42);
+        assert_eq!(result.contestant_to_interactor, b"1\n");
+        assert_eq!(result.interactor_to_contestant, b"correct\n");
+        assert_eq!(result.interactor.metrics.protocol_bytes, 8);
+    }
+
+    #[test]
+    fn contestant_reads_buffered_bytes_then_eof_after_the_interactor_exits() {
+        let contestant = peer_program(
+            r#"(local $total i32)
+              (local.set $total (call $drain_stdin))
+              (call $exit (select (i32.const 0) (i32.const 1)
+                (i32.and
+                  (i32.eq (local.get $total) (i32.const 4))
+                  (i32.eq (i32.load (i32.const 256)) (i32.const 0x0a657962)))))"#,
+            "",
+        );
+        let interactor = peer_program("(drop (call $write (i32.const 4)))", "bye\\n");
+
+        let result = interact_pair(contestant, interactor);
+
+        assert_eq!(result.interactor.termination, ExecutionTermination::Exited);
+        assert_eq!(result.interactor.code, 0);
+        assert_eq!(result.contestant.termination, ExecutionTermination::Exited);
+        assert_eq!(result.contestant.code, 0);
+        assert_eq!(result.interactor_to_contestant, b"bye\n");
+    }
+
+    #[test]
+    fn contestant_writes_to_an_exited_interactor_without_a_broken_pipe() {
+        let contestant = peer_program(
+            r#"(local $round i32)
+              (local $errno i32)
+              (drop (call $drain_stdin))
+              (loop $again
+                (local.set $errno (call $write (i32.const 2)))
+                (if (local.get $errno) (then (call $exit (local.get $errno))))
+                (if (i32.ne (i32.load (i32.const 24)) (i32.const 2)) (then (call $exit (i32.const 4))))
+                (local.set $round (i32.add (local.get $round) (i32.const 1)))
+                (br_if $again (i32.lt_u (local.get $round) (i32.const 3))))
+              (call $exit (i32.const 42))"#,
+            "x\\n",
+        );
+        let interactor = peer_program("(drop (call $write (i32.const 4)))", "bye\\n");
+
+        let result = interact_pair(contestant, interactor);
+
+        assert_eq!(result.interactor.termination, ExecutionTermination::Exited);
+        assert_eq!(result.interactor.code, 0);
+        assert_eq!(result.contestant.termination, ExecutionTermination::Exited);
+        assert_eq!(result.contestant.code, 42);
+        assert_eq!(result.contestant_to_interactor, b"x\nx\nx\n");
+        assert_eq!(result.interactor_to_contestant, b"bye\n");
     }
 
     fn program(wasm: Vec<u8>) -> InteractiveProgram {

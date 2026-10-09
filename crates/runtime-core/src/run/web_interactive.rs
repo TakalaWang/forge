@@ -291,13 +291,18 @@ impl std::fmt::Debug for StreamOutput {
 }
 
 impl AsyncWrite for StreamOutput {
+    /// Drops bytes written after the peer closed its stdin, as native does; they are already in
+    /// the transcript.
     fn poll_write(
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
         buffer: &[u8],
     ) -> Poll<io::Result<usize>> {
         match Pin::new(&mut self.capture).poll_write(context, buffer) {
-            Poll::Ready(Ok(written)) => Poll::Ready(self.streams.write(&buffer[..written])),
+            Poll::Ready(Ok(written)) => Poll::Ready(match self.streams.write(&buffer[..written]) {
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(written),
+                result => result,
+            }),
             result => result,
         }
     }

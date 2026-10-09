@@ -217,6 +217,102 @@ describe.skipIf(!enabled)("real server judge contracts", () => {
     });
   });
 
+  it("lets C and CPython interactors reply to a contestant that already exited", { timeout: 300_000 }, async () => {
+    const contestant = await compileC("final-guess", [
+        "#include <stdio.h>",
+        "int main(void) {",
+        "  puts(\"7\");",
+        "  return 0;",
+        "}",
+      ].join("\n"));
+    const interactors = {
+      c: await compileC("c-reply-after-exit", [
+          "#include <stdio.h>",
+          "int main(int argc, char **argv) {",
+          "  long long secret = 0, guess = 0;",
+          "  FILE *input = argc > 1 ? fopen(argv[1], \"r\") : NULL;",
+          "  if (!input || fscanf(input, \"%lld\", &secret) != 1) return 2;",
+          "  if (scanf(\"%lld\", &guess) != 1) return 3;",
+          "  while (getchar() != EOF) {}",
+          "  puts(guess == secret ? \"correct\" : \"wrong\");",
+          "  if (fflush(stdout) != 0) return 4;",
+          "  return guess == secret ? 42 : 43;",
+          "}",
+        ].join("\n")),
+      python: await compilePython("python-reply-after-exit", [
+          "import sys",
+          "secret = int(open(sys.argv[1]).read())",
+          "guess = int(input())",
+          "sys.stdin.read()",
+          "print(\"correct\" if guess == secret else \"wrong\", flush=True)",
+          "sys.exit(42 if guess == secret else 43)",
+        ].join("\n")),
+    };
+
+    for (const [language, interactor] of Object.entries(interactors)) {
+      for (const [secret, code, reply] of [[7, 42, "correct\n"], [8, 43, "wrong\n"]] as const) {
+        const result = await engine.interact(contestant, interactor, {
+          interactor: { args: ["/judge/input.txt"], files: { "/judge/input.txt": `${secret}\n` } },
+        });
+        expect({ language, secret, result }).toMatchObject({
+          language,
+          secret,
+          result: {
+            contestantToInteractor: "7\n",
+            interactorToContestant: reply,
+            contestant: { code: 0, termination: "exited" },
+            interactor: { code, termination: "exited" },
+          },
+        });
+      }
+    }
+  });
+
+  it("gives the contestant EOF and accepts its writes after the interactor exits", { timeout: 300_000 }, async () => {
+    const contestant = await compileC("write-after-interactor", [
+        "#include <errno.h>",
+        "#include <stdio.h>",
+        "#include <string.h>",
+        "#include <unistd.h>",
+        "int main(void) {",
+        "  char word[8];",
+        "  if (scanf(\"%7s\", word) != 1 || strcmp(word, \"bye\") != 0) return 2;",
+        "  if (scanf(\"%7s\", word) != EOF || !feof(stdin)) return 3;",
+        "  for (int i = 0; i < 3; ++i)",
+        "    if (write(1, \"x\\n\", 2) != 2) return errno == EPIPE ? 32 : 33;",
+        "  return 0;",
+        "}",
+      ].join("\n"));
+    const interactor = await compileC("early-exit", [
+        "#include <stdio.h>",
+        "int main(void) {",
+        "  puts(\"bye\");",
+        "  return 0;",
+        "}",
+      ].join("\n"));
+
+    const result = await engine.interact(contestant, interactor, {});
+
+    expect(result).toMatchObject({
+      contestantToInteractor: "x\nx\nx\n",
+      interactorToContestant: "bye\n",
+      contestant: { code: 0, termination: "exited" },
+      interactor: { code: 0, termination: "exited" },
+    });
+  });
+
+  async function compilePython(name: string, source: string): Promise<BuildArtifact> {
+    const built = await engine.compile({
+      projectId: `judge-integration:${name}`,
+      name,
+      language: "python",
+      entry: "main.py",
+      files: { "main.py": `${source}\n` },
+    }, { cache: false });
+    if (!built.success || !built.artifact) throw new Error(`Failed to compile ${name}: ${built.stderr}`);
+    return built.artifact;
+  }
+
   async function compileC(name: string, source: string): Promise<BuildArtifact> {
     const entry = `src/${name}.c`;
     const input: CompileInput = {
