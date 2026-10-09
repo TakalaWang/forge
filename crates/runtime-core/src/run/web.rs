@@ -2,7 +2,9 @@ use super::web_runtime::runtime_with_engine;
 use crate::capabilities::attach_capability_denials;
 use crate::deterministic::{VirtualClock, attach_deterministic_imports};
 use crate::filesystem::{read_files_bounded, runtime_project_files};
-use crate::meter::{CostPoints, METER_MODEL, instrument_wasm, meter_state, remaining_points};
+use crate::meter::{
+    CostPoints, METER_MODEL, attach_safepoint, instrument_wasm, meter_state, remaining_points,
+};
 use crate::module_imports::attach_imported_memory;
 use crate::module_policy::{DEFERRED_START_EXPORT, defer_start_section, enforce_memory_limit};
 use crate::output::{CappedOutput, OutputBudget, OutputCapture};
@@ -102,6 +104,7 @@ pub(super) fn execute(
         clock.clone(),
         request.startup_entropy_bytes,
     );
+    attach_safepoint(&mut store, &mut imports);
     attach_capability_denials(&mut store, &module, &mut imports).map_err(RunError::Compile)?;
     let imported_memory =
         attach_imported_memory(&mut store, &module, &mut imports).map_err(RunError::Compile)?;

@@ -6,6 +6,15 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 
 ## Unreleased
 
+- WebKit now stops a terminated or killed Worker that is running a metered program within well under
+  a millisecond, so the Web Lock liveness check reports it at once. JavaScriptCore never acts on
+  `Worker.terminate()` inside Wasm, only at JavaScript checkpoints such as `Atomics.wait`, so a
+  killed runner or interactive side kept computing until its instruction budget ran out (up to tens
+  of seconds) and the session ended at its wall limit. Every 2^20 units, at the next function entry
+  or loop iteration, the meter now calls an uncharged `wasm_oj_metering.safepoint` import, which the
+  browser runtime turns into such a checkpoint and the native runtime ignores. Costs, cost profiles'
+  cost values and the exhaustion point are unchanged; the refreshed runtime identity changes cost
+  profile identifiers.
 - Browser runner, compiler, compiler stage (rustc, Go, Java) and interactive side Workers that die
   without an `error` event, for example when the browser terminates them, now reject their
   operation promptly as a runner or compiler failure. A silently killed Worker used to leave the operation waiting for its wall-time

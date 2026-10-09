@@ -3,7 +3,9 @@ use crate::deterministic::{VirtualClock, attach_interactive_deterministic_import
 use crate::filesystem::{
     RuntimeProjectFilesystem, is_normalized_guest_path, runtime_project_files,
 };
-use crate::meter::{CostPoints, MeterState, instrument_wasm, meter_state, remaining_points};
+use crate::meter::{
+    CostPoints, MeterState, attach_safepoint, instrument_wasm, meter_state, remaining_points,
+};
 use crate::module_imports::attach_declared_memory_imports;
 use crate::module_policy::{
     DEFERRED_START_EXPORT, defer_start_section, enforce_memory_limit,
@@ -571,6 +573,7 @@ fn interactive_runtime(
             clock.clone(),
             startup_entropy_bytes,
         );
+        attach_safepoint(store, &mut imports);
         attach_capability_denials(store, module, &mut imports).map_err(io::Error::other)?;
         attach_declared_memory_imports(store, module, &mut imports).map_err(io::Error::other)?;
         Ok(imports)

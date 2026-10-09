@@ -256,6 +256,7 @@ try {
       window.livenessOperation = operation => {
         const builds = window.livenessBuilds;
         if (operation === "interact") return window.engine.interact(builds.readOne, builds.readOne, blocked);
+        if (operation === "interact-compute") return window.engine.interact(builds.computeLoop, builds.readOne, { contestant:{ resources:{ instructionBudget:1e15, wallTimeLimitMs:20000 } }, interactor:{ resources:{ wallTimeLimitMs:20000 } } });
         if (operation === "run-yielding") return window.engine.run(builds.yieldLoop, { resources:{ instructionBudget:1e15, wallTimeLimitMs:20000 } });
         if (operation === "run-compute") return window.engine.run(builds.computeLoop, { resources:{ instructionBudget:1e15, wallTimeLimitMs:15000 } });
         if (operation === "compile-rust") return window.engine.compile({ language:"rust", target:"wasip1", optimization:"release", entry:"main.rs", files:{ "main.rs":'fn main(){println!("{}", 42);}' }, projectId:"csp-liveness-rust" }, { cache:false });
@@ -292,7 +293,8 @@ try {
       { label:"liveness-interactive-interactor", operation:"interact", killer:() => nestedKiller("wasm-oj-runner", "wasm-oj-interactive-interactor"), check:(outcome, killMs) => crashed(outcome, killMs, 3000) && outcome.error.includes("interactive interactor Worker") },
       { label:"liveness-runner-interact", operation:"interact", killer:async () => pageKiller("wasm-oj-runner"), check:(outcome, killMs) => crashed(outcome, killMs, 3000) },
       { label:"liveness-runner-run-yielding", operation:"run-yielding", killer:async () => pageKiller("wasm-oj-runner"), check:(outcome, killMs) => crashed(outcome, killMs, 4000) },
-      { label:"liveness-runner-run-compute", operation:"run-compute", killer:async () => pageKiller("wasm-oj-runner"), check:(outcome, killMs) => browserName === "webkit" ? outcome.ok && outcome.summary === "wall-time-limit" : crashed(outcome, killMs, 4000) },
+      { label:"liveness-runner-run-compute", operation:"run-compute", killer:async () => pageKiller("wasm-oj-runner"), check:(outcome, killMs) => crashed(outcome, killMs, 4000) },
+      { label:"liveness-interactive-compute", operation:"interact-compute", killer:() => nestedKiller("wasm-oj-runner", "wasm-oj-interactive-contestant"), check:(outcome, killMs) => crashed(outcome, killMs, 4000) && outcome.error.includes("interactive contestant Worker") },
       { label:"liveness-compiler", operation:"compile", killAfterMs:300, killer:async () => pageKiller("wasm-oj-compiler"), check:(outcome, killMs) => crashed(outcome, killMs, 4000) },
       { label:"liveness-compiler-stage", operation:"compile-rust", killAfterMs:0, killer:() => nestedKiller("wasm-oj-compiler", "wasm-oj-rustc-stage", 1000), check:(outcome, killMs) => crashed(outcome, killMs, 4000) },
     ];

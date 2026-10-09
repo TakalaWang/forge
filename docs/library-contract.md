@@ -129,9 +129,12 @@ A module Worker that dies without an `error` event, for example because the brow
 is reported like a crash: its operation rejects with a `runner-failure` or `compiler-failure`
 instead of waiting for its wall-time or build deadline, so a killed Worker is never reported as a
 time limit. Each Worker holds a Web Lock for its lifetime, and its owner learns of the death when
-that lock frees. Without Web Locks the previous behaviour remains. In WebKit a terminated Worker
-keeps its lock while it runs Wasm, so a Worker killed in the middle of a computation is reported
-only when it next returns to JavaScript; Chromium reports a busy Worker about 2 s after the kill.
+that lock frees. Without Web Locks the previous behaviour remains. WebKit stops a terminated Worker
+only at JavaScript checkpoints, never inside Wasm, so a metered program reaches the runtime's
+safepoint every 2^20 instruction units (see the runtime policy in the architecture guide) and a
+killed Worker running one stops within that interval. Chromium reports a busy Worker about 2 s after
+the kill. Unmetered toolchain code, such as clang or rustc running in a compiler stage, has no
+safepoint, so in WebKit such a stage is reported only when it next returns to JavaScript.
 
 Wasmer secondary Workers are host implementation details. They use the SDK's supported `workerUrl`
 protocol and do not grant guest thread-spawn capability. The host page must be cross-origin

@@ -156,8 +156,14 @@ Before instantiation the runtime validates the module, removes non-semantic debu
 preserves required runtime metadata, and injects a mutable 64-bit weighted instruction meter. The
 budget is present before a start section can execute. A function that has a loop but no parameters
 or locals also gets one unused local: JavaScriptCore never optimizes such a loop and runs it about 20
-times slower than Chromium, so it would reach the wall deadline before its budget. Static original-opcode counts and normalized
-cost are reported separately from injected meter instructions.
+times slower than Chromium, so it would reach the wall deadline before its budget. Each function entry and
+loop iteration also compares the counter with a threshold. Once it drops 2^20 units below the last
+safepoint, a cold function calls the imported `wasm_oj_metering.safepoint`, which does nothing
+natively and in browsers performs an `Atomics.wait` that returns at once, a point where
+JavaScriptCore acts on `Worker.terminate()`. Loops reach it through a branch out of the loop, because
+a call inside a hot loop slows the whole loop in JavaScriptCore and V8 even when it never runs. The
+check and the safepoint are not charged, so costs and the exhaustion point are unchanged. Static
+original-opcode counts and normalized cost are reported separately from injected meter instructions.
 
 Contract 2 enforces:
 
