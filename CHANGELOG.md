@@ -6,6 +6,8 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 
 ## Unreleased
 
+## 0.2.4 - 2026-10-09
+
 - Fixed a host process crash (`Uncaught Error: write EPIPE`) when `ServerRunner` cancelled or
   timed out a runtime preparation stage, run or interactive session while its request was
   still being written to the child's stdin. Late stdin errors after cleanup are now ignored.
@@ -32,6 +34,9 @@ All notable changes to WASM-OJ are recorded here. Releases follow
   peer at once, so browser and server give the same verdicts. The runner Worker also sends
   `startupEntropyBytes` for interactive programs. The refreshed runtime identity changes cost
   profiles.
+
+- Kept the execution contract at version 2. The seven code packages move together to 0.2.4;
+  independently versioned toolchain packages remain at 0.2.0.
 
 ## 0.2.3 - 2026-10-05
 

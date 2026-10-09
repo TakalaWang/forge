@@ -1,6 +1,6 @@
 {
   "name": "@wasm-oj/core",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Host-neutral compiler, runner, judge, dependency, and replay orchestration for WASM-OJ.",
   "license": "MIT",
   "author": "JacobLinCool",
@@ -47,7 +47,7 @@
     "prepack": "pnpm run build"
   },
   "dependencies": {
-    "@wasm-oj/contracts": "workspace:0.2.3",
+    "@wasm-oj/contracts": "workspace:0.2.4",
     "fflate": "0.8.3"
   }
 }

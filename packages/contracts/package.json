@@ -1,6 +1,6 @@
 {
   "name": "@wasm-oj/contracts",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Environment-neutral contracts and wire types for the WASM-OJ SDK.",
   "license": "MIT",
   "author": "JacobLinCool",

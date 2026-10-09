@@ -1,6 +1,6 @@
 {
   "name": "@wasm-oj/organizer",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Problem collection and immutable judge-data publication tools for WASM-OJ.",
   "license": "MIT",
   "author": "JacobLinCool",
@@ -47,6 +47,6 @@
     "prepack": "pnpm run build"
   },
   "dependencies": {
-    "@wasm-oj/core": "workspace:0.2.3"
+    "@wasm-oj/core": "workspace:0.2.4"
   }
 }
