@@ -1,3 +1,5 @@
+import { onModuleWorkerLost } from "./module-worker";
+
 export type IsolatedStageResponse<Result> =
   | { type: "result"; result: Result }
   | { type: "shutdown-complete" }
@@ -51,6 +53,7 @@ export class PersistentIsolatedStage<Request, Result> {
     this.worker.addEventListener("message", this.onMessage);
     this.worker.addEventListener("error", this.onError);
     this.worker.addEventListener("messageerror", this.onMessageError);
+    onModuleWorkerLost(this.worker, (error) => this.fail(error));
   }
 
   run(request: Request): Promise<Result> {
@@ -247,6 +250,7 @@ export function runIsolatedStage<Request, Result>(
     worker.addEventListener("message", onMessage);
     worker.addEventListener("error", onError);
     worker.addEventListener("messageerror", onMessageError);
+    onModuleWorkerLost(worker, (error) => finish(() => reject(error)));
     try {
       worker.postMessage(request);
     } catch (error) {

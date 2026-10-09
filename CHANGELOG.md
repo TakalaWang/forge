@@ -6,6 +6,14 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 
 ## Unreleased
 
+- Browser runner, compiler, compiler stage (rustc, Go, Java) and interactive side Workers that die
+  without an `error` event, for example when the browser terminates them, now reject their
+  operation promptly as a runner or compiler failure. A silently killed Worker used to leave the operation waiting for its wall-time
+  limit, which reported the student's program as `wall-time-limit`. Each module Worker holds a Web
+  Lock for its lifetime and its owner treats the lock's release as a crash; without Web Locks
+  nothing changes. Interactive pipes now wake every 100 ms while waiting, so a terminated side
+  Worker stops promptly in WebKit, which otherwise keeps it blocked in `Atomics.wait`.
+
 ## 0.2.4 - 2026-10-09
 
 - Fixed a host process crash (`Uncaught Error: write EPIPE`) when `ServerRunner` cancelled or
