@@ -6,6 +6,14 @@ All notable changes to WASM-OJ are recorded here. Releases follow
 
 ## Unreleased
 
+- Fixed WebKit page crashes during browser compiles (`SIGSEGV` in
+  `JSC::SharedArrayBufferContents::grow`; the CSP suite lost its page in 7 of 10 full WebKit runs).
+  JavaScriptCore crashes when a shared `WebAssembly.Memory` grows while a Worker whose instance
+  imported it is being torn down. The Wasmer SDK terminates one of its thread Workers whenever a
+  WASIX thread or process ends and starts the next in a new Worker that grows their shared memory,
+  six to nine times per C compile. The compiler, rustc-stage and runner Workers now hold the SDK's
+  terminations until the build or run ends and wait 250 ms after the last one before the next.
+
 ## 0.2.4 - 2026-10-09
 
 - Fixed a host process crash (`Uncaught Error: write EPIPE`) when `ServerRunner` cancelled or
