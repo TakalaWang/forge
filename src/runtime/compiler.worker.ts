@@ -56,6 +56,7 @@ import JavaStageWorkerUrl from "./java-stage.worker?worker&url";
 import type { JavaCompileRequest, JavaCompileResult, JavaStageRequest } from "@/src/compiler/java-toolchain";
 import { JAVA_COMPILE_TIMEOUT_MS } from "@/src/compiler/java-toolchain";
 import { PersistentIsolatedStage } from "./isolated-stage";
+import { OwnedWorkerRegistry, type WorkerConstructorHost } from "./owned-worker-registry";
 import {
   createModuleWorker,
   createModuleWorkerBootstrap,
@@ -70,6 +71,10 @@ let toolchainSources: readonly BrowserToolchainSource[] | undefined;
 let runtime: Runtime | undefined;
 let runtimeInitialization: Promise<void> | undefined;
 let wasmerThreadWorkerBootstrap: ModuleWorkerBootstrap | undefined;
+const wasmerThreadWorkers = new OwnedWorkerRegistry(globalThis as unknown as WorkerConstructorHost, {
+  owns: (scriptUrl) => scriptUrl === wasmerThreadWorkerBootstrap?.url,
+});
+let wasmerThreadWorkersInstalled = false;
 let rustStage: PersistentIsolatedStage<RustcStageRequest, RustCompileResult> | undefined;
 let goStage: PersistentIsolatedStage<GoStageRequest, GoCompileResult> | undefined;
 let javaStage: PersistentIsolatedStage<JavaStageRequest, JavaCompileResult> | undefined;
@@ -237,6 +242,10 @@ async function ensureOuterRuntime(requestId: string): Promise<void> {
     const bootstrap = createModuleWorkerBootstrap(new URL(wasmerThreadWorkerUrl, workerBaseUrl));
     wasmerThreadWorkerBootstrap = bootstrap;
     try {
+      if (!wasmerThreadWorkersInstalled) {
+        wasmerThreadWorkers.install();
+        wasmerThreadWorkersInstalled = true;
+      }
       await init({
         log: "warn",
         module: new URL(wasmerWasmUrl, workerBaseUrl),
@@ -316,7 +325,7 @@ scope.addEventListener("message", (event: MessageEvent<CompilerRequest>) => {
           post({
             type: "build-result",
             requestId: request.requestId,
-            result: await build(request),
+            result: await wasmerThreadWorkers.run(() => build(request)),
           });
           break;
         case "quiesce":

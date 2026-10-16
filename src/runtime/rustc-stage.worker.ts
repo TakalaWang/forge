@@ -34,6 +34,7 @@ const NESTED_WORKER_RELEASE_GRACE_MS = 1_000;
 let requestTail = Promise.resolve();
 let toolchain: Promise<RustStageToolchain> | undefined;
 let toolchainBaseUrl: string | undefined;
+const wasmerThreadWorkers = new OwnedWorkerRegistry(globalThis as unknown as WorkerConstructorHost);
 let ownedWasmerWorkers: OwnedWorkerRegistry | undefined;
 let wasmerThreadWorkerBootstrap: ModuleWorkerBootstrap | undefined;
 
@@ -164,7 +165,7 @@ async function respond(message: RustcStageRequest): Promise<void> {
       scope.close();
       return;
     }
-    const result = await compile(message);
+    const result = await wasmerThreadWorkers.run(() => compile(message));
     const response: RustcStageResponse = { type: "result", result };
     const transfer = result.wasm ? [result.wasm.buffer] : [];
     scope.postMessage(response, transfer);
@@ -225,9 +226,8 @@ function loadToolchain(baseUrl: URL): Promise<RustStageToolchain> {
 }
 
 async function initializeToolchain(baseUrl: URL): Promise<RustStageToolchain> {
-  const workerRegistry = new OwnedWorkerRegistry(globalThis as unknown as WorkerConstructorHost);
-  workerRegistry.install();
-  ownedWasmerWorkers = workerRegistry;
+  wasmerThreadWorkers.install();
+  ownedWasmerWorkers = wasmerThreadWorkers;
   const bootstrap = createModuleWorkerBootstrap(new URL(wasmerThreadWorkerUrl, workerBaseUrl));
   wasmerThreadWorkerBootstrap = bootstrap;
   try {
