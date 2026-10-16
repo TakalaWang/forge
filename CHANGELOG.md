@@ -35,6 +35,13 @@ All notable changes to WASM-OJ are recorded here. Releases follow
   repeat its reply up to five times in the transcript. Reads still return the remaining buffered
   bytes and then EOF. This applies to the server and the browser. The refreshed runtime identity
   changes cost profiles.
+- Fixed WebKit page crashes during browser compiles (`SIGSEGV` in
+  `JSC::SharedArrayBufferContents::grow`; the CSP suite lost its page in 7 of 10 full WebKit runs).
+  JavaScriptCore crashes when a shared `WebAssembly.Memory` grows while a Worker whose instance
+  imported it is being torn down. The Wasmer SDK terminates one of its thread Workers whenever a
+  WASIX thread or process ends and starts the next in a new Worker that grows their shared memory,
+  six to nine times per C compile. The compiler, rustc-stage and runner Workers now hold the SDK's
+  terminations until the build or run ends and wait 250 ms after the last one before the next.
 
 ## 0.2.4 - 2026-10-09
 

@@ -331,6 +331,18 @@ try {
       console.log(JSON.stringify({ label:"liveness-no-false-positive", pass:steadyPass, outcomes:steady }));
     } else console.log(JSON.stringify({ label:"liveness-preparation", pass:false, error:prepared }));
   }
+  if (selected.length === 0 || selected.includes("sdk-worker-churn")) {
+    console.log("START sdk-worker-churn");
+    const churn = await page.evaluate(async () => {
+      for (let index = 0; index < 30; index++) {
+        const build = await window.engine.compile({ language:"c", target:"wasip1", optimization:"release", entry:"main.c", files:{ "main.c":`int main(void){return ${index};}` }, projectId:`csp-sdk-churn-${index}` }, { cache:false });
+        if (!build.success) return { compiles:index, error:build.stderr };
+      }
+      return { compiles:30 };
+    }).catch((error) => ({ error:String(error) }));
+    record.sdkWorkerChurn = { pass:churn.compiles === 30, ...churn };
+    console.log(JSON.stringify({ label:"sdk-worker-churn", ...record.sdkWorkerChurn }));
+  }
   record.capabilities = [];
   for (const invoke of [false, true]) {
     const wasmPath = path.join(output, `capability-${invoke}.wasm`);
@@ -363,5 +375,5 @@ finally {
   await browser?.close();
   await new Promise(resolve => server.close(resolve));
 }
-if(record.results.some(result=>!result.pass)||record.capabilities?.some(result=>!result.pass)||record.executionTiming?.pass===false||record.interactive?.some(result=>!result.pass)||record.liveness?.some(result=>!result.pass))process.exitCode=1;
+if(record.results.some(result=>!result.pass)||record.capabilities?.some(result=>!result.pass)||record.executionTiming?.pass===false||record.interactive?.some(result=>!result.pass)||record.liveness?.some(result=>!result.pass)||record.sdkWorkerChurn?.pass===false)process.exitCode=1;
 console.log(`EVIDENCE ${path.join(output,"results.json")}`);

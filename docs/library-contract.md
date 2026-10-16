@@ -138,7 +138,11 @@ safepoint, so in WebKit such a stage is reported only when it next returns to Ja
 
 Wasmer secondary Workers are host implementation details. They use the SDK's supported `workerUrl`
 protocol and do not grant guest thread-spawn capability. The host page must be cross-origin
-isolated.
+isolated. The SDK terminates a secondary Worker whenever a WASIX thread or process ends; WASM-OJ
+holds those terminations until the current build or run ends, and starts the next one only after
+250 ms without a termination. JavaScriptCore crashes the page when a shared `WebAssembly.Memory`
+grows while a Worker whose instance imported it is being torn down, and the SDK's Workers share one
+memory that grows throughout a build.
 
 ## Server execution boundary
 

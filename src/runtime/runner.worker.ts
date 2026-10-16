@@ -66,6 +66,7 @@ import { createInteractivePipe, interactivePipeCapacity } from "./interactive-pi
 import type { InteractiveSideMessage, InteractiveSideStart } from "./interactive-side.worker";
 import interactiveSideWorkerUrl from "./interactive-side.worker?worker&url";
 import wasmerThreadWorkerUrl from "./wasmer-thread.worker?worker&url";
+import { OwnedWorkerRegistry, type WorkerConstructorHost } from "./owned-worker-registry";
 import { loadBrowserRuntimeDriverPlugins } from "./browser-runtime-plugin";
 import type { BrowserRuntimeDriverPlugin } from "@/src/core/types";
 
@@ -77,6 +78,10 @@ const packageFileSystems = new Map<string, Promise<Record<string, Uint8Array>>>(
 let sdkRuntime: Runtime | undefined;
 let sdkRuntimeInitialization: Promise<Runtime> | undefined;
 let wasmerThreadWorkerBootstrap: ModuleWorkerBootstrap | undefined;
+const wasmerThreadWorkers = new OwnedWorkerRegistry(globalThis as unknown as WorkerConstructorHost, {
+  owns: (scriptUrl) => scriptUrl === wasmerThreadWorkerBootstrap?.url,
+});
+let wasmerThreadWorkersInstalled = false;
 let runtimeDrivers: RuntimeDriverRegistry | undefined;
 let quickJsBytes: Promise<Uint8Array> | undefined;
 let toolchainSources: readonly BrowserToolchainSource[] | undefined;
@@ -180,6 +185,10 @@ async function ensurePackageRuntime(): Promise<Runtime> {
     const bootstrap = createModuleWorkerBootstrap(new URL(wasmerThreadWorkerUrl, workerBaseUrl));
     wasmerThreadWorkerBootstrap = bootstrap;
     try {
+      if (!wasmerThreadWorkersInstalled) {
+        wasmerThreadWorkers.install();
+        wasmerThreadWorkersInstalled = true;
+      }
       await init({
         log: "warn",
         module: new URL(wasmerWasmUrl, workerBaseUrl),
@@ -602,17 +611,21 @@ scope.addEventListener("message", (event: MessageEvent<RunnerRequest>) => {
           post({ type: "ready", requestId: request.requestId });
           break;
         case "run":
-          post({ type: "run-result", requestId: request.requestId, result: await runArtifact(request) });
+          post({
+            type: "run-result",
+            requestId: request.requestId,
+            result: await wasmerThreadWorkers.run(() => runArtifact(request)),
+          });
           break;
         case "interact":
           post({
             type: "interactive-result",
             requestId: request.requestId,
-            result: await interactArtifacts(request),
+            result: await wasmerThreadWorkers.run(() => interactArtifacts(request)),
           });
           break;
         case "clear-runtime-cache":
-          await clearRuntimeCaches();
+          await wasmerThreadWorkers.run(() => clearRuntimeCaches());
           post({ type: "runtime-cache-cleared", requestId: request.requestId });
           break;
       }
