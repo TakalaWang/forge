@@ -10,8 +10,10 @@ export interface OwnedWorkerRegistryOptions {
 }
 
 /**
- * Time a terminated Worker's VM takes to be torn down. A shared memory that grows during that
- * teardown can crash WebKit (see `run`), so new operations wait this long after the last one.
+ * Conservative workaround for WebKit's shared-memory grow/VM teardown race. The PR #105
+ * reproduction survived a 100 ms delay after terminate(); 250 ms also survived ten full-suite
+ * runs. This margin is empirical, not a browser guarantee that teardown has completed.
+ * New operations must observe the full quiet period after the most recent termination.
  */
 export const OWNED_WORKER_TEARDOWN_QUIET_MS = 250;
 
@@ -73,8 +75,11 @@ export class OwnedWorkerRegistry {
    * whose instance imported it is being torn down, so teardowns are kept away from operations.
    */
   async run<T>(operation: () => Promise<T>): Promise<T> {
-    const wait = this.lastTeardownAt + this.teardownQuietMs - performance.now();
-    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    for (;;) {
+      const wait = this.lastTeardownAt + this.teardownQuietMs - performance.now();
+      if (wait <= 0) break;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
     this.operations += 1;
     try {
       return await operation();

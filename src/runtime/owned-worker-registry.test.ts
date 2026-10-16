@@ -124,6 +124,29 @@ describe("OwnedWorkerRegistry", () => {
     expect(started).toBe(true);
   });
 
+  it("restarts the quiet period when another Worker terminates while waiting", async () => {
+    vi.useFakeTimers();
+    const host = hostWithOwnConstructor();
+    const registry = new OwnedWorkerRegistry(host, { teardownQuietMs: 250 });
+    registry.install();
+    const first = new host.Worker("first.js");
+    const late = new host.Worker("late.js");
+    first.terminate();
+
+    let started = false;
+    const operation = registry.run(async () => { started = true; });
+    await vi.advanceTimersByTimeAsync(200);
+    late.terminate();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(started).toBe(false);
+    await vi.advanceTimersByTimeAsync(199);
+    expect(started).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await operation;
+    expect(started).toBe(true);
+    registry.terminateAll();
+  });
+
   it("leaves Workers it does not own untouched", async () => {
     const host = hostWithOwnConstructor();
     const registry = new OwnedWorkerRegistry(host, { owns: (url) => url === "thread.js", teardownQuietMs: 0 });
